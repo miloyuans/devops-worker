@@ -21,6 +21,14 @@ type App struct {
 }
 
 func (a *App) routes() http.Handler {
+	appMux := http.NewServeMux()
+	appMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	})
+	appMux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	})
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleDashboard)
 	mux.HandleFunc("/users", a.handleUsers)
@@ -36,7 +44,8 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/approvals", a.handleApprovals)
 	mux.HandleFunc("/history", a.handleHistory)
 	mux.Handle("/previews/", http.StripPrefix("/previews/", http.FileServer(http.Dir(filepath.Join(a.Cfg.DataDir, "previews")))))
-	return a.basicAuth(mux)
+	appMux.Handle("/", a.basicAuth(mux))
+	return appMux
 }
 
 func (a *App) basicAuth(next http.Handler) http.Handler {
