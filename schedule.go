@@ -128,6 +128,62 @@ func MergeScheduleItems(existing []ScheduleItem, updates []ScheduleItem) []Sched
 	return merged
 }
 
+func NormalizeDraftChanges(changes []ScheduleDraftChange) []ScheduleDraftChange {
+	latest := map[string]string{}
+	dateSet := map[string]bool{}
+	staffSet := map[string]bool{}
+	for _, ch := range changes {
+		shift := strings.TrimSpace(ch.ShiftCode)
+		if shift == "" {
+			continue
+		}
+		for _, rawDate := range ch.Dates {
+			date := strings.TrimSpace(rawDate)
+			if date == "" {
+				continue
+			}
+			for _, rawStaff := range ch.StaffIDs {
+				staff := strings.TrimSpace(rawStaff)
+				if staff == "" {
+					continue
+				}
+				key := date + "|" + staff
+				latest[key] = shift
+				dateSet[date] = true
+				staffSet[staff] = true
+			}
+		}
+	}
+	keys := make([]string, 0, len(latest))
+	for key := range latest {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]ScheduleDraftChange, 0, len(keys))
+	for _, key := range keys {
+		parts := strings.SplitN(key, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		out = append(out, ScheduleDraftChange{Dates: []string{parts[0]}, StaffIDs: []string{parts[1]}, ShiftCode: latest[key]})
+	}
+	_ = dateSet
+	_ = staffSet
+	return out
+}
+
+func DraftChangesToRules(changes []ScheduleDraftChange, year int, month int) []ScheduleRule {
+	changes = NormalizeDraftChanges(changes)
+	rules := make([]ScheduleRule, 0, len(changes))
+	for _, ch := range changes {
+		if len(ch.Dates) == 0 || len(ch.StaffIDs) == 0 || strings.TrimSpace(ch.ShiftCode) == "" {
+			continue
+		}
+		rules = append(rules, ScheduleRule{ID: newID("rule"), Year: year, Month: month, Dates: ch.Dates, StaffIDs: ch.StaffIDs, ShiftCode: strings.TrimSpace(ch.ShiftCode), Enabled: true})
+	}
+	return rules
+}
+
 func makeShiftTime(date time.Time, shift Shift, loc *time.Location) (time.Time, time.Time, error) {
 	startHour, startMin, err := parseClock(shift.Start)
 	if err != nil {

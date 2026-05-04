@@ -89,21 +89,29 @@ type ActiveSchedule struct {
 	Items            []ScheduleItem `json:"items"`
 }
 
+type ApprovalMessageRef struct {
+	ChatID    int64 `json:"chat_id"`
+	ThreadID  int   `json:"thread_id,omitempty"`
+	MessageID int   `json:"message_id"`
+}
+
 type Approval struct {
-	ID            string         `json:"id"`
-	Status        string         `json:"status"`
-	CreatedBy     string         `json:"created_by"`
-	CreatedAt     string         `json:"created_at"`
-	ReviewedBy    int64          `json:"reviewed_by,omitempty"`
-	ReviewedAt    string         `json:"reviewed_at,omitempty"`
-	ApproverIDs   []int64        `json:"approver_ids"`
-	Rules         []ScheduleRule `json:"rules"`
-	PreviewItems  []ScheduleItem `json:"preview_items"`
-	PreviewHTML   string         `json:"preview_html"`
-	BaseRevision  int            `json:"base_revision"`
-	NewRevision   int            `json:"new_revision"`
-	RejectReason  string         `json:"reject_reason,omitempty"`
-	StatusMessage string         `json:"status_message,omitempty"`
+	ID            string               `json:"id"`
+	TransactionID string               `json:"transaction_id"`
+	Status        string               `json:"status"`
+	CreatedBy     string               `json:"created_by"`
+	CreatedAt     string               `json:"created_at"`
+	ReviewedBy    int64                `json:"reviewed_by,omitempty"`
+	ReviewedAt    string               `json:"reviewed_at,omitempty"`
+	ApproverIDs   []int64              `json:"approver_ids"`
+	Rules         []ScheduleRule       `json:"rules"`
+	PreviewItems  []ScheduleItem       `json:"preview_items"`
+	PreviewHTML   string               `json:"preview_html"`
+	MessageRefs   []ApprovalMessageRef `json:"message_refs,omitempty"`
+	BaseRevision  int                  `json:"base_revision"`
+	NewRevision   int                  `json:"new_revision"`
+	RejectReason  string               `json:"reject_reason,omitempty"`
+	StatusMessage string               `json:"status_message,omitempty"`
 }
 
 type NotificationRecord struct {

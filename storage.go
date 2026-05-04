@@ -212,16 +212,17 @@ func (s *Storage) CreateApproval(createdBy string, rules []ScheduleRule, preview
 			return err
 		}
 		approval = &Approval{
-			ID:           id,
-			Status:       "pending",
-			CreatedBy:    createdBy,
-			CreatedAt:    time.Now().Format(time.RFC3339),
-			ApproverIDs:  approvers,
-			Rules:        rules,
-			PreviewItems: previewItems,
-			PreviewHTML:  htmlRel,
-			BaseRevision: active.Revision,
-			NewRevision:  active.Revision + 1,
+			ID:            id,
+			TransactionID: newID("txn"),
+			Status:        "pending",
+			CreatedBy:     createdBy,
+			CreatedAt:     time.Now().Format(time.RFC3339),
+			ApproverIDs:   approvers,
+			Rules:         rules,
+			PreviewItems:  previewItems,
+			PreviewHTML:   htmlRel,
+			BaseRevision:  active.Revision,
+			NewRevision:   active.Revision + 1,
 		}
 		return writeJSONAtomic(filepath.Join(s.Dir, "approvals", "pending", id+".json"), approval)
 	})
@@ -229,6 +230,34 @@ func (s *Storage) CreateApproval(createdBy string, rules []ScheduleRule, preview
 		return nil, err
 	}
 	return approval, nil
+}
+
+func (s *Storage) AttachApprovalMessageRefs(id string, refs []ApprovalMessageRef) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	return s.WithLock(func() error {
+		approval, path, err := s.LoadPendingApproval(id)
+		if err != nil {
+			return err
+		}
+		seen := map[string]bool{}
+		for _, ref := range approval.MessageRefs {
+			seen[fmt.Sprintf("%d:%d", ref.ChatID, ref.MessageID)] = true
+		}
+		for _, ref := range refs {
+			if ref.ChatID == 0 || ref.MessageID == 0 {
+				continue
+			}
+			key := fmt.Sprintf("%d:%d", ref.ChatID, ref.MessageID)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			approval.MessageRefs = append(approval.MessageRefs, ref)
+		}
+		return writeJSONAtomic(path, approval)
+	})
 }
 
 func (s *Storage) LoadPendingApproval(id string) (Approval, string, error) {
@@ -240,7 +269,7 @@ func (s *Storage) LoadPendingApproval(id string) (Approval, string, error) {
 	return approval, path, nil
 }
 
-func (s *Storage) Approve(id string, reviewerID int64) (*Approval, error) {
+func (s *Storage) Approve(id string, reviewerID int64, loc *time.Location) (*Approval, error) {
 	var updated *Approval
 	err := s.WithLock(func() error {
 		approval, pendingPath, err := s.LoadPendingApproval(id)
@@ -257,17 +286,31 @@ func (s *Storage) Approve(id string, reviewerID int64) (*Approval, error) {
 		if err != nil {
 			return err
 		}
-		if active.Revision != approval.BaseRevision {
-			return fmt.Errorf("正式排班版本已从 %d 变为 %d，请重新提交审批", approval.BaseRevision, active.Revision)
+		users, err := s.LoadUsers()
+		if err != nil {
+			return err
 		}
+		shifts, err := s.LoadShifts()
+		if err != nil {
+			return err
+		}
+		updateItems, err := BuildScheduleItems(approval.Rules, users, shifts, loc)
+		if err != nil {
+			return err
+		}
+		finalItems := MergeScheduleItems(active.Items, updateItems)
 		now := time.Now().Format(time.RFC3339)
+		newRevision := active.Revision + 1
+		if html, err := RenderPreviewHTML(approval.ID, finalItems, active.Revision, newRevision); err == nil {
+			_ = writeFileAtomic(filepath.Join(s.Dir, approval.PreviewHTML), []byte(html))
+		}
 		newActive := ActiveSchedule{
-			Revision:         approval.NewRevision,
-			VersionID:        newVersionID(approval.NewRevision),
+			Revision:         newRevision,
+			VersionID:        newVersionID(newRevision),
 			EffectiveAt:      now,
 			ApprovedBy:       reviewerID,
 			SourceApprovalID: approval.ID,
-			Items:            approval.PreviewItems,
+			Items:            finalItems,
 		}
 		if err := s.SaveActiveLocked(newActive); err != nil {
 			return err
@@ -278,7 +321,9 @@ func (s *Storage) Approve(id string, reviewerID int64) (*Approval, error) {
 		approval.Status = "approved"
 		approval.ReviewedBy = reviewerID
 		approval.ReviewedAt = now
-		approval.StatusMessage = "审批通过，排班已生效"
+		approval.NewRevision = newRevision
+		approval.PreviewItems = finalItems
+		approval.StatusMessage = "审批通过，排班已按最新正式数据合并生效"
 		approvedPath := filepath.Join(s.Dir, "approvals", "approved", approval.ID+".json")
 		if err := writeJSONAtomic(approvedPath, approval); err != nil {
 			return err

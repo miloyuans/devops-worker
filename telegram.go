@@ -221,31 +221,53 @@ func (t *TelegramService) SendApproval(a *Approval) error {
 	if t == nil || a == nil {
 		return nil
 	}
-	caption := fmt.Sprintf("📋 排班策略审批请求\n\n审批ID: %s\n版本: %d -> %d\n提交人: %s\n记录数: %d\n\n请打开 HTML 附件查看最终生效预览，然后点击同意或拒绝。", a.ID, a.BaseRevision, a.NewRevision, a.CreatedBy, len(a.PreviewItems))
-	replyMarkup := map[string]any{
-		"inline_keyboard": [][]map[string]string{{
-			{"text": "✅ 同意生效", "callback_data": "approve:" + a.ID},
-			{"text": "❌ 拒绝", "callback_data": "reject:" + a.ID},
-		}},
-	}
+	approverText := t.approverMentionText(a.ApproverIDs)
+	caption := fmt.Sprintf("📋 <b>排班策略审批请求</b>\n\n审批ID: <code>%s</code>\n事务ID: <code>%s</code>\n提交人: %s\n变更记录: %d\n审批人: %s\n\n请打开 HTML 附件查看预览。任一审批人点击同意或拒绝后，所有审批窗口会同步更新状态。", html.EscapeString(a.ID), html.EscapeString(a.TransactionID), html.EscapeString(a.CreatedBy), len(a.Rules), approverText)
+	replyMarkup := approvalActionMarkup(a.ID, false)
 	previewPath := filepath.Join(t.Cfg.DataDir, a.PreviewHTML)
+	refs := make([]ApprovalMessageRef, 0, len(t.Cfg.GroupChatIDs)+len(a.ApproverIDs))
 	var lastErr error
-	for _, uid := range a.ApproverIDs {
-		if err := t.sendDocument(uid, 0, previewPath, caption, replyMarkup); err != nil {
-			lastErr = err
-			log.Printf("send approval to approver %d failed: %v", uid, err)
-		}
-	}
 	for _, chatID := range t.Cfg.GroupChatIDs {
-		if err := t.sendDocument(chatID, t.getThreadID(chatID, 0), previewPath, caption, replyMarkup); err != nil {
+		threadID := t.getThreadID(chatID, 0)
+		ref, err := t.sendDocument(chatID, threadID, previewPath, caption, "HTML", replyMarkup)
+		if err != nil {
 			lastErr = err
 			log.Printf("send approval to group %d failed: %v", chatID, err)
+			continue
+		}
+		refs = append(refs, ref)
+	}
+	for _, uid := range a.ApproverIDs {
+		ref, err := t.sendDocument(uid, 0, previewPath, caption, "HTML", replyMarkup)
+		if err != nil {
+			lastErr = err
+			log.Printf("send approval to approver %d failed: %v", uid, err)
+			continue
+		}
+		refs = append(refs, ref)
+	}
+	if len(refs) > 0 {
+		a.MessageRefs = append(a.MessageRefs, refs...)
+		if err := t.Store.AttachApprovalMessageRefs(a.ID, refs); err != nil {
+			log.Printf("attach approval message refs failed: %v", err)
 		}
 	}
 	return lastErr
 }
 
-func (t *TelegramService) sendDocument(chatID int64, threadID int, filePath string, caption string, replyMarkup any) error {
+func approvalActionMarkup(approvalID string, disabled bool) map[string]any {
+	if disabled {
+		return map[string]any{"inline_keyboard": [][]map[string]string{{{"text": "审批已结束", "callback_data": "noop:" + approvalID}}}}
+	}
+	return map[string]any{
+		"inline_keyboard": [][]map[string]string{{
+			{"text": "✅ 同意生效", "callback_data": "approve:" + approvalID},
+			{"text": "❌ 拒绝", "callback_data": "reject:" + approvalID},
+		}},
+	}
+}
+
+func (t *TelegramService) sendDocument(chatID int64, threadID int, filePath string, caption string, parseMode string, replyMarkup any) (ApprovalMessageRef, error) {
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	_ = mw.WriteField("chat_id", strconv.FormatInt(chatID, 10))
@@ -255,45 +277,89 @@ func (t *TelegramService) sendDocument(chatID int64, threadID int, filePath stri
 	if caption != "" {
 		_ = mw.WriteField("caption", caption)
 	}
+	if parseMode != "" {
+		_ = mw.WriteField("parse_mode", parseMode)
+	}
 	if replyMarkup != nil {
 		rm, _ := json.Marshal(replyMarkup)
 		_ = mw.WriteField("reply_markup", string(rm))
 	}
 	file, err := os.Open(filePath)
 	if err != nil {
-		return err
+		return ApprovalMessageRef{}, err
 	}
 	defer file.Close()
 	fw, err := mw.CreateFormFile("document", filepath.Base(filePath))
 	if err != nil {
-		return err
+		return ApprovalMessageRef{}, err
 	}
 	if _, err := io.Copy(fw, file); err != nil {
-		return err
+		return ApprovalMessageRef{}, err
 	}
 	if err := mw.Close(); err != nil {
-		return err
+		return ApprovalMessageRef{}, err
 	}
 	req, err := http.NewRequest(http.MethodPost, t.BaseURL+"sendDocument", &body)
 	if err != nil {
-		return err
+		return ApprovalMessageRef{}, err
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	resp, err := t.HTTPClient.Do(req)
 	if err != nil {
-		return err
+		return ApprovalMessageRef{}, err
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("telegram http %d: %s", resp.StatusCode, string(respBody))
+		return ApprovalMessageRef{}, fmt.Errorf("telegram http %d: %s", resp.StatusCode, string(respBody))
 	}
-	var apiResp telegramAPIResponse[json.RawMessage]
+	var apiResp telegramAPIResponse[telegramMessage]
 	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return err
+		return ApprovalMessageRef{}, err
 	}
 	if !apiResp.OK {
-		return fmt.Errorf(apiResp.Description)
+		return ApprovalMessageRef{}, fmt.Errorf(apiResp.Description)
+	}
+	return ApprovalMessageRef{ChatID: chatID, ThreadID: threadID, MessageID: apiResp.Result.MessageID}, nil
+}
+
+func (t *TelegramService) editApprovalMessages(a *Approval) {
+	if t == nil || a == nil || len(a.MessageRefs) == 0 {
+		return
+	}
+	reviewer := t.telegramDisplayName(a.ReviewedBy)
+	statusLine := "审批已结束"
+	if a.Status == "approved" {
+		statusLine = "✅ " + reviewer + " 审批通过，排班已按最新正式数据合并生效"
+	} else if a.Status == "rejected" {
+		statusLine = "❌ " + reviewer + " 审批拒绝，本次策略未生效"
+	}
+	caption := fmt.Sprintf("📋 <b>排班策略审批结果</b>\n\n审批ID: <code>%s</code>\n事务ID: <code>%s</code>\n状态: %s\n处理时间: %s\n\n所有审批窗口已同步更新。", html.EscapeString(a.ID), html.EscapeString(a.TransactionID), html.EscapeString(statusLine), html.EscapeString(a.ReviewedAt))
+	for _, ref := range a.MessageRefs {
+		if err := t.editMessageCaption(ref.ChatID, ref.MessageID, caption, "HTML", approvalActionMarkup(a.ID, true)); err != nil {
+			log.Printf("edit approval message failed chat=%d msg=%d: %v", ref.ChatID, ref.MessageID, err)
+		}
+	}
+}
+
+func (t *TelegramService) editMessageCaption(chatID int64, messageID int, caption string, parseMode string, replyMarkup any) error {
+	vals := url.Values{}
+	vals.Set("chat_id", strconv.FormatInt(chatID, 10))
+	vals.Set("message_id", strconv.Itoa(messageID))
+	vals.Set("caption", caption)
+	if parseMode != "" {
+		vals.Set("parse_mode", parseMode)
+	}
+	if replyMarkup != nil {
+		rm, _ := json.Marshal(replyMarkup)
+		vals.Set("reply_markup", string(rm))
+	}
+	var resp telegramAPIResponse[json.RawMessage]
+	if err := t.postForm("editMessageCaption", vals, &resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf(resp.Description)
 	}
 	return nil
 }
@@ -308,13 +374,14 @@ func (t *TelegramService) handleCallback(cq *telegramCallbackQuery) {
 	reviewerID := cq.From.ID
 	switch action {
 	case "approve":
-		approval, err := t.Store.Approve(approvalID, reviewerID)
+		approval, err := t.Store.Approve(approvalID, reviewerID, t.Loc)
 		if err != nil {
 			t.answerCallback(cq.ID, "审批失败: "+err.Error(), true)
 			return
 		}
 		t.answerCallback(cq.ID, "已同意，排班已生效", true)
-		t.replyToCallbackMessage(cq, fmt.Sprintf("✅ 审批已通过并生效\n审批ID: %s\n新版本: %d\n审批人: %d", approval.ID, approval.NewRevision, reviewerID))
+		t.editApprovalMessages(approval)
+		t.replyToCallbackMessage(cq, fmt.Sprintf("✅ 审批已通过并生效\n审批ID: %s\n审批人: %s", approval.ID, t.telegramDisplayName(reviewerID)))
 	case "reject":
 		approval, err := t.Store.Reject(approvalID, reviewerID, "telegram callback rejected")
 		if err != nil {
@@ -322,7 +389,10 @@ func (t *TelegramService) handleCallback(cq *telegramCallbackQuery) {
 			return
 		}
 		t.answerCallback(cq.ID, "已拒绝，本次策略未生效", true)
-		t.replyToCallbackMessage(cq, fmt.Sprintf("❌ 审批已拒绝，策略未生效\n审批ID: %s\n审批人: %d", approval.ID, reviewerID))
+		t.editApprovalMessages(approval)
+		t.replyToCallbackMessage(cq, fmt.Sprintf("❌ 审批已拒绝，策略未生效\n审批ID: %s\n审批人: %s", approval.ID, t.telegramDisplayName(reviewerID)))
+	case "noop":
+		t.answerCallback(cq.ID, "该审批已经结束", false)
 	case "read":
 		rec, err := t.Store.MarkNotificationRead(approvalID, reviewerID)
 		if err != nil {
@@ -345,6 +415,28 @@ func (t *TelegramService) answerCallback(id, text string, alert bool) {
 	if err := t.postForm("answerCallbackQuery", vals, &resp); err != nil {
 		log.Printf("answer callback failed: %v", err)
 	}
+}
+
+func (t *TelegramService) approverMentionText(ids []int64) string {
+	if len(ids) == 0 {
+		return "未配置"
+	}
+	users, _ := t.Store.LoadUsers()
+	nameByID := map[int64]string{}
+	for _, u := range users {
+		if u.TelegramUserID != 0 {
+			nameByID[u.TelegramUserID] = u.Name
+		}
+	}
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		name := nameByID[id]
+		if name == "" {
+			name = fmt.Sprintf("审批人%d", id)
+		}
+		parts = append(parts, fmt.Sprintf("<a href=\"tg://user?id=%d\">%s</a>", id, html.EscapeString(name)))
+	}
+	return strings.Join(parts, "、")
 }
 
 func (t *TelegramService) telegramDisplayName(id int64) string {

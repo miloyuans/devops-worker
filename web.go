@@ -384,12 +384,7 @@ func (a *App) parseScheduleSubmitRules(r *http.Request, year int, month int) ([]
 		if err := json.Unmarshal([]byte(draftRaw), &changes); err != nil {
 			return nil, fmt.Errorf("草稿内容格式错误: %w", err)
 		}
-		for _, ch := range changes {
-			if len(ch.Dates) == 0 || len(ch.StaffIDs) == 0 || strings.TrimSpace(ch.ShiftCode) == "" {
-				continue
-			}
-			rules = append(rules, ScheduleRule{ID: newID("rule"), Year: year, Month: month, Dates: ch.Dates, StaffIDs: ch.StaffIDs, ShiftCode: strings.TrimSpace(ch.ShiftCode), Enabled: true})
-		}
+		rules = append(rules, DraftChangesToRules(changes, year, month)...)
 	} else {
 		dates := splitCSV(r.FormValue("selected_dates"))
 		staffIDs := r.Form["staff_ids"]
