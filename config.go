@@ -13,7 +13,7 @@ func loadConfig() Config {
 		GroupTopicMap:   map[int64]int{},
 		WebAddr:         envOr("WEB_ADDR", ":8080"),
 		DataDir:         envOr("DATA_DIR", "./data"),
-		Timezone:        envOr("APP_TIMEZONE", "Asia/Shanghai"),
+		Timezone:        envOr("APP_TIMEZONE", DefaultShiftTimezone),
 		AdminUsername:   envOr("ADMIN_USERNAME", "admin"),
 		AdminPassword:   envOr("ADMIN_PASSWORD", "change_me"),
 		GroupChatIDs:    parseInt64List(os.Getenv("GROUP_CHAT_IDS")),

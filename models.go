@@ -18,6 +18,7 @@ type Shift struct {
 	ShortName string `json:"short_name"`
 	Start     string `json:"start"`
 	End       string `json:"end"`
+	Timezone  string `json:"timezone"`
 	CrossDay  bool   `json:"cross_day"`
 	Enabled   bool   `json:"enabled"`
 }
@@ -37,6 +38,12 @@ type StaffUser struct {
 
 type UserDB struct {
 	Users []StaffUser `json:"users"`
+}
+
+type ScheduleDraftChange struct {
+	Dates     []string `json:"dates"`
+	StaffIDs  []string `json:"staff_ids"`
+	ShiftCode string   `json:"shift_code"`
 }
 
 type ScheduleRule struct {
@@ -65,6 +72,8 @@ type ScheduleItem struct {
 
 type ScheduleItemStatus struct {
 	ScheduleItem
+	StartClock        string `json:"start_clock"`
+	EndClock          string `json:"end_clock"`
 	NotifyStatus      string `json:"notify_status"`
 	NotifyStatusLabel string `json:"notify_status_label"`
 	ReadStatus        string `json:"read_status"`
@@ -128,7 +137,14 @@ type CalendarDay struct {
 	IsToday        bool
 	IsSelected     bool
 	IsWeekend      bool
+	HolidayName    string
+	HolidayType    string
 	Items          []ScheduleItem
+}
+
+type TimezoneOption struct {
+	Name  string
+	Label string
 }
 
 type ShiftUpdateSummary struct {
@@ -154,6 +170,7 @@ type PageData struct {
 	Months            []int
 	WeekNums          []int
 	TimeOptions       []string
+	TimezoneOptions   []TimezoneOption
 	CalendarYear      int
 	CalendarMonth     int
 	CalendarDays      []CalendarDay

@@ -58,14 +58,14 @@ func (s *Storage) ensureDefaultShifts() error {
 		}
 		changed := false
 		for i := range shifts {
+			if shifts[i].Timezone == "" {
+				shifts[i].Timezone = DefaultShiftTimezone
+				changed = true
+			}
 			cross := deriveCrossDay(shifts[i].Start, shifts[i].End)
 			if shifts[i].CrossDay != cross {
 				shifts[i].CrossDay = cross
 				changed = true
-			}
-			if !shifts[i].Enabled {
-				// Existing files keep their explicit disabled state. New defaults below are enabled.
-				continue
 			}
 		}
 		if changed {
@@ -74,10 +74,10 @@ func (s *Storage) ensureDefaultShifts() error {
 		return nil
 	}
 	cfg := ShiftConfig{Shifts: []Shift{
-		{Code: "morning", Name: "早班", ShortName: "早", Start: "09:00", End: "18:00", CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true},
-		{Code: "middle", Name: "中班", ShortName: "中", Start: "15:00", End: "24:00", CrossDay: deriveCrossDay("15:00", "24:00"), Enabled: true},
-		{Code: "night", Name: "晚班", ShortName: "晚", Start: "00:00", End: "09:00", CrossDay: deriveCrossDay("00:00", "09:00"), Enabled: true},
-		{Code: "normal", Name: "正常班", ShortName: "正常", Start: "09:00", End: "18:00", CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true},
+		{Code: "morning", Name: "早班", ShortName: "早", Start: "09:00", End: "18:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true},
+		{Code: "middle", Name: "中班", ShortName: "中", Start: "15:00", End: "24:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("15:00", "24:00"), Enabled: true},
+		{Code: "night", Name: "晚班", ShortName: "晚", Start: "00:00", End: "09:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "09:00"), Enabled: true},
+		{Code: "normal", Name: "正常班", ShortName: "正常", Start: "09:00", End: "18:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true},
 	}}
 	return writeJSONAtomic(path, cfg)
 }
@@ -525,7 +525,11 @@ func (s *Storage) MarkNotificationRead(recordID string, readerID int64) (*Notifi
 	return updated, err
 }
 
-func (s *Storage) BuildScheduleItemStatuses(items []ScheduleItem) []ScheduleItemStatus {
+func (s *Storage) BuildScheduleItemStatuses(items []ScheduleItem, locs ...*time.Location) []ScheduleItemStatus {
+	loc := time.Local
+	if len(locs) > 0 && locs[0] != nil {
+		loc = locs[0]
+	}
 	state, _ := s.LoadNotifications()
 	byItem := map[string][]NotificationRecord{}
 	for _, rec := range state.Records {
@@ -533,7 +537,7 @@ func (s *Storage) BuildScheduleItemStatuses(items []ScheduleItem) []ScheduleItem
 	}
 	out := make([]ScheduleItemStatus, 0, len(items))
 	for _, item := range items {
-		status := ScheduleItemStatus{ScheduleItem: item, NotifyStatus: "off", NotifyStatusLabel: "未通知", ReadStatus: "off", ReadStatusLabel: "未读"}
+		status := ScheduleItemStatus{ScheduleItem: item, StartClock: clockInLocation(item.StartTime, loc), EndClock: clockInLocation(item.EndTime, loc), NotifyStatus: "off", NotifyStatusLabel: "未通知", ReadStatus: "off", ReadStatusLabel: "未读"}
 		recs := byItem[notificationItemKey(item)]
 		if len(recs) > 0 {
 			status.NotifyStatus = "ok"

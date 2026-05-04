@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const DefaultShiftTimezone = "Asia/Dubai"
+
 func BuildScheduleItems(rules []ScheduleRule, users []StaffUser, shifts []Shift, loc *time.Location) ([]ScheduleItem, error) {
 	userMap := map[string]StaffUser{}
 	for _, u := range users {
@@ -135,12 +137,20 @@ func makeShiftTime(date time.Time, shift Shift, loc *time.Location) (time.Time, 
 	if err != nil {
 		return time.Time{}, time.Time{}, fmt.Errorf("班次 %s 结束时间错误: %w", shift.Name, err)
 	}
-	start := time.Date(date.Year(), date.Month(), date.Day(), startHour, startMin, 0, 0, loc)
+	shiftLoc := loc
+	if strings.TrimSpace(shift.Timezone) != "" {
+		loaded, err := time.LoadLocation(strings.TrimSpace(shift.Timezone))
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("班次 %s 时区错误: %w", shift.Name, err)
+		}
+		shiftLoc = loaded
+	}
+	start := time.Date(date.Year(), date.Month(), date.Day(), startHour, startMin, 0, 0, shiftLoc)
 	var end time.Time
 	if strings.TrimSpace(shift.End) == "24:00" {
-		end = time.Date(date.Year(), date.Month(), date.Day()+1, 0, 0, 0, 0, loc)
+		end = time.Date(date.Year(), date.Month(), date.Day()+1, 0, 0, 0, 0, shiftLoc)
 	} else {
-		end = time.Date(date.Year(), date.Month(), date.Day(), endHour, endMin, 0, 0, loc)
+		end = time.Date(date.Year(), date.Month(), date.Day(), endHour, endMin, 0, 0, shiftLoc)
 	}
 	if !end.After(start) {
 		end = end.Add(24 * time.Hour)
@@ -166,10 +176,18 @@ func normalizeShift(sh Shift) (Shift, error) {
 	sh.ShortName = strings.TrimSpace(sh.ShortName)
 	sh.Start = strings.TrimSpace(sh.Start)
 	sh.End = strings.TrimSpace(sh.End)
+	sh.Timezone = strings.TrimSpace(sh.Timezone)
+	if sh.Timezone == "" {
+		sh.Timezone = DefaultShiftTimezone
+	}
 	if sh.Code == "" || sh.Name == "" || sh.ShortName == "" || sh.Start == "" || sh.End == "" {
 		return sh, fmt.Errorf("班次编码、名称、简称、开始和结束时间都不能为空")
 	}
-	if _, _, err := makeShiftTime(time.Now(), sh, time.Local); err != nil {
+	loc, err := time.LoadLocation(sh.Timezone)
+	if err != nil {
+		return sh, fmt.Errorf("时区无效: %s", sh.Timezone)
+	}
+	if _, _, err := makeShiftTime(time.Now().In(loc), sh, loc); err != nil {
 		return sh, err
 	}
 	sh.CrossDay = deriveCrossDay(sh.Start, sh.End)

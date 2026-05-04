@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -64,14 +65,15 @@ func (a *App) render(w http.ResponseWriter, templateName string, data PageData) 
 func (a *App) basePage(title string) PageData {
 	now := time.Now().In(a.Loc)
 	return PageData{
-		Title:       title,
-		Config:      a.Cfg,
-		NowYear:     now.Year(),
-		NowMonth:    int(now.Month()),
-		NowDate:     now.Format("2006-01-02"),
-		Months:      []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
-		WeekNums:    []int{1, 2, 3, 4, 5},
-		TimeOptions: buildTimeOptions(),
+		Title:           title,
+		Config:          a.Cfg,
+		NowYear:         now.Year(),
+		NowMonth:        int(now.Month()),
+		NowDate:         now.Format("2006-01-02"),
+		Months:          []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
+		WeekNums:        []int{1, 2, 3, 4, 5},
+		TimeOptions:     buildTimeOptions(),
+		TimezoneOptions: buildTimezoneOptions(),
 	}
 }
 
@@ -84,6 +86,18 @@ func buildTimeOptions() []string {
 	}
 	options = append(options, "24:00")
 	return options
+}
+
+func buildTimezoneOptions() []TimezoneOption {
+	return []TimezoneOption{
+		{Name: "Asia/Dubai", Label: "迪拜 / 阿联酋 (Asia/Dubai)"},
+		{Name: "Asia/Shanghai", Label: "中国上海 / 北京时间 (Asia/Shanghai)"},
+		{Name: "Asia/Singapore", Label: "新加坡 (Asia/Singapore)"},
+		{Name: "Asia/Tokyo", Label: "东京 (Asia/Tokyo)"},
+		{Name: "UTC", Label: "UTC"},
+		{Name: "Europe/Berlin", Label: "柏林 (Europe/Berlin)"},
+		{Name: "America/New_York", Label: "纽约 (America/New_York)"},
+	}
 }
 
 func (a *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -103,7 +117,7 @@ func (a *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	a.fillCalendar(&data, year, month, selected, active.Items)
 	a.fillDayStatuses(&data, active.Items)
 	items := filterItemsByDate(active.Items, selected)
-	data.SelectedDayItems = a.Store.BuildScheduleItemStatuses(items)
+	data.SelectedDayItems = a.Store.BuildScheduleItemStatuses(items, a.Loc)
 	a.render(w, "dashboard", data)
 }
 
@@ -204,6 +218,7 @@ func (a *App) handleShiftCreate(w http.ResponseWriter, r *http.Request) {
 		ShortName: r.FormValue("short_name"),
 		Start:     r.FormValue("start"),
 		End:       r.FormValue("end"),
+		Timezone:  r.FormValue("timezone"),
 		Enabled:   true,
 	})
 	if err != nil {
@@ -243,6 +258,7 @@ func (a *App) handleShiftUpdate(w http.ResponseWriter, r *http.Request) {
 				ShortName: r.FormValue("short_name"),
 				Start:     r.FormValue("start"),
 				End:       r.FormValue("end"),
+				Timezone:  r.FormValue("timezone"),
 				Enabled:   r.FormValue("enabled") != "false",
 			}
 			sh, err := normalizeShift(candidate)
@@ -302,7 +318,7 @@ func (a *App) handleSchedule(w http.ResponseWriter, r *http.Request) {
 	year, month, selected := a.resolveCalendarRequest(r, data.NowYear, data.NowMonth, data.NowDate)
 	a.fillCalendar(&data, year, month, selected, active.Items)
 	a.fillDayStatuses(&data, active.Items)
-	data.SelectedDayItems = a.Store.BuildScheduleItemStatuses(filterItemsByDate(active.Items, selected))
+	data.SelectedDayItems = a.Store.BuildScheduleItemStatuses(filterItemsByDate(active.Items, selected), a.Loc)
 	a.render(w, "schedule", data)
 }
 
@@ -314,18 +330,15 @@ func (a *App) handleScheduleSubmit(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	year, _ := strconv.Atoi(r.FormValue("year"))
 	month, _ := strconv.Atoi(r.FormValue("month"))
-	dates := splitCSV(r.FormValue("selected_dates"))
-	staffIDs := r.Form["staff_ids"]
-	shiftCode := strings.TrimSpace(r.FormValue("shift_code"))
 	createdBy := strings.TrimSpace(r.FormValue("created_by"))
 	if createdBy == "" {
 		createdBy = "web"
 	}
-	if len(dates) == 0 || len(staffIDs) == 0 || shiftCode == "" {
-		a.renderError(w, "排班提交失败", "请在日历中至少选择一个日期，并选择用户和班次")
+	rules, err := a.parseScheduleSubmitRules(r, year, month)
+	if err != nil {
+		a.renderError(w, "排班提交失败", err.Error())
 		return
 	}
-	rule := ScheduleRule{ID: newID("rule"), Year: year, Month: month, Dates: dates, StaffIDs: staffIDs, ShiftCode: shiftCode, Enabled: true}
 	users, err := a.Store.LoadUsers()
 	if err != nil {
 		a.renderError(w, "排班提交失败", err.Error())
@@ -336,7 +349,7 @@ func (a *App) handleScheduleSubmit(w http.ResponseWriter, r *http.Request) {
 		a.renderError(w, "排班提交失败", err.Error())
 		return
 	}
-	newItems, err := BuildScheduleItems([]ScheduleRule{rule}, users, shifts, a.Loc)
+	newItems, err := BuildScheduleItems(rules, users, shifts, a.Loc)
 	if err != nil {
 		a.renderError(w, "排班提交失败", err.Error())
 		return
@@ -348,7 +361,7 @@ func (a *App) handleScheduleSubmit(w http.ResponseWriter, r *http.Request) {
 		a.renderError(w, "排班提交失败", err.Error())
 		return
 	}
-	approval, err := a.Store.CreateApproval(createdBy, []ScheduleRule{rule}, previewItems, html, a.Cfg.ApproverUserIDs)
+	approval, err := a.Store.CreateApproval(createdBy, rules, previewItems, html, a.Cfg.ApproverUserIDs)
 	if err != nil {
 		a.renderError(w, "排班提交失败", err.Error())
 		return
@@ -361,6 +374,34 @@ func (a *App) handleScheduleSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	http.Redirect(w, r, "/approvals", http.StatusSeeOther)
+}
+
+func (a *App) parseScheduleSubmitRules(r *http.Request, year int, month int) ([]ScheduleRule, error) {
+	draftRaw := strings.TrimSpace(r.FormValue("draft_rules"))
+	var rules []ScheduleRule
+	if draftRaw != "" {
+		var changes []ScheduleDraftChange
+		if err := json.Unmarshal([]byte(draftRaw), &changes); err != nil {
+			return nil, fmt.Errorf("草稿内容格式错误: %w", err)
+		}
+		for _, ch := range changes {
+			if len(ch.Dates) == 0 || len(ch.StaffIDs) == 0 || strings.TrimSpace(ch.ShiftCode) == "" {
+				continue
+			}
+			rules = append(rules, ScheduleRule{ID: newID("rule"), Year: year, Month: month, Dates: ch.Dates, StaffIDs: ch.StaffIDs, ShiftCode: strings.TrimSpace(ch.ShiftCode), Enabled: true})
+		}
+	} else {
+		dates := splitCSV(r.FormValue("selected_dates"))
+		staffIDs := r.Form["staff_ids"]
+		shiftCode := strings.TrimSpace(r.FormValue("shift_code"))
+		if len(dates) > 0 && len(staffIDs) > 0 && shiftCode != "" {
+			rules = append(rules, ScheduleRule{ID: newID("rule"), Year: year, Month: month, Dates: dates, StaffIDs: staffIDs, ShiftCode: shiftCode, Enabled: true})
+		}
+	}
+	if len(rules) == 0 {
+		return nil, fmt.Errorf("请先至少加入一条排班草稿，再统一提交审批")
+	}
+	return rules, nil
 }
 
 func (a *App) renderError(w http.ResponseWriter, title, errMsg string) {
@@ -403,7 +444,7 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 		data.Error = err.Error()
 	}
 	data.HistoryDate = date
-	data.History = a.Store.BuildScheduleItemStatuses(dayItems)
+	data.History = a.Store.BuildScheduleItemStatuses(dayItems, a.Loc)
 	a.fillCalendar(&data, year, month, date, items)
 	a.fillDayStatuses(&data, items)
 	data.SelectedDayItems = data.History
@@ -440,7 +481,7 @@ func (a *App) fillCalendar(data *PageData, year int, month int, selected string,
 }
 
 func (a *App) fillDayStatuses(data *PageData, items []ScheduleItem) {
-	statuses := a.Store.BuildScheduleItemStatuses(items)
+	statuses := a.Store.BuildScheduleItemStatuses(items, a.Loc)
 	byDate := map[string][]ScheduleItemStatus{}
 	for _, item := range statuses {
 		byDate[item.Date] = append(byDate[item.Date], item)
@@ -465,7 +506,8 @@ func buildCalendarDays(year int, month int, selected string, today string, items
 		dayItems := append([]ScheduleItem(nil), byDate[date]...)
 		sortScheduleItems(dayItems)
 		isWeekend := d.Weekday() == time.Saturday || d.Weekday() == time.Sunday
-		days = append(days, CalendarDay{Date: date, Day: d.Day(), IsCurrentMonth: int(d.Month()) == month, IsToday: date == today, IsSelected: date == selected, IsWeekend: isWeekend, Items: dayItems})
+		calInfo := ChinaCalendar(date)
+		days = append(days, CalendarDay{Date: date, Day: d.Day(), IsCurrentMonth: int(d.Month()) == month, IsToday: date == today, IsSelected: date == selected, IsWeekend: isWeekend, HolidayName: calInfo.Name, HolidayType: calInfo.Type, Items: dayItems})
 	}
 	return days
 }
