@@ -347,6 +347,18 @@ func (t *TelegramService) answerCallback(id, text string, alert bool) {
 	}
 }
 
+func (t *TelegramService) telegramDisplayName(id int64) string {
+	users, err := t.Store.LoadUsers()
+	if err == nil {
+		for _, u := range users {
+			if u.TelegramUserID == id {
+				return u.Name
+			}
+		}
+	}
+	return "未绑定审批人"
+}
+
 func (t *TelegramService) replyToCallbackMessage(cq *telegramCallbackQuery, text string) {
 	if cq.Message == nil {
 		return

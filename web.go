@@ -86,8 +86,10 @@ func (a *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	} else {
 		data.Active = active
 	}
+	data.Users, _ = a.Store.LoadUsers()
 	year, month, selected := a.resolveCalendarRequest(r, data.NowYear, data.NowMonth, data.NowDate)
 	a.fillCalendar(&data, year, month, selected, active.Items)
+	a.fillDayStatuses(&data, active.Items)
 	items := filterItemsByDate(active.Items, selected)
 	data.SelectedDayItems = a.Store.BuildScheduleItemStatuses(items)
 	a.render(w, "dashboard", data)
@@ -184,23 +186,26 @@ func (a *App) handleShiftCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = r.ParseForm()
-	code := sanitizeFileName(strings.TrimSpace(r.FormValue("code")))
-	name := strings.TrimSpace(r.FormValue("name"))
-	shortName := strings.TrimSpace(r.FormValue("short_name"))
-	start := strings.TrimSpace(r.FormValue("start"))
-	end := strings.TrimSpace(r.FormValue("end"))
-	if code == "" || name == "" || shortName == "" || start == "" || end == "" {
-		a.renderError(w, "班次设置", "班次编码、名称、简称、开始和结束时间都不能为空")
+	shift, err := normalizeShift(Shift{
+		Code:      r.FormValue("code"),
+		Name:      r.FormValue("name"),
+		ShortName: r.FormValue("short_name"),
+		Start:     r.FormValue("start"),
+		End:       r.FormValue("end"),
+		Enabled:   true,
+	})
+	if err != nil {
+		a.renderError(w, "班次设置", err.Error())
 		return
 	}
 	shifts, _ := a.Store.LoadShifts()
 	for _, sh := range shifts {
-		if sh.Code == code {
+		if sh.Code == shift.Code {
 			a.renderError(w, "班次设置", "班次编码已存在")
 			return
 		}
 	}
-	shifts = append(shifts, Shift{Code: code, Name: name, ShortName: shortName, Start: start, End: end, CrossDay: r.FormValue("cross_day") == "true", Enabled: true})
+	shifts = append(shifts, shift)
 	if err := a.Store.SaveShifts(shifts); err != nil {
 		log.Printf("save shift error: %v", err)
 	}
@@ -215,18 +220,41 @@ func (a *App) handleShiftUpdate(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	code := r.FormValue("code")
 	shifts, _ := a.Store.LoadShifts()
+	var updated Shift
+	found := false
 	for i := range shifts {
 		if shifts[i].Code == code {
-			shifts[i].Name = strings.TrimSpace(r.FormValue("name"))
-			shifts[i].ShortName = strings.TrimSpace(r.FormValue("short_name"))
-			shifts[i].Start = strings.TrimSpace(r.FormValue("start"))
-			shifts[i].End = strings.TrimSpace(r.FormValue("end"))
-			shifts[i].CrossDay = r.FormValue("cross_day") == "true"
-			shifts[i].Enabled = r.FormValue("enabled") == "true"
+			old := shifts[i]
+			candidate := Shift{
+				Code:      old.Code,
+				Name:      r.FormValue("name"),
+				ShortName: r.FormValue("short_name"),
+				Start:     r.FormValue("start"),
+				End:       r.FormValue("end"),
+				Enabled:   r.FormValue("enabled") != "false",
+			}
+			sh, err := normalizeShift(candidate)
+			if err != nil {
+				a.renderError(w, "班次设置", err.Error())
+				return
+			}
+			shifts[i] = sh
+			updated = sh
+			found = true
+			break
 		}
+	}
+	if !found {
+		a.renderError(w, "班次设置", "班次不存在")
+		return
 	}
 	if err := a.Store.SaveShifts(shifts); err != nil {
 		log.Printf("update shift error: %v", err)
+	}
+	if summary, err := a.Store.UpdateFutureItemsForShift(updated, a.Loc); err != nil {
+		log.Printf("update future schedule items failed: %v", err)
+	} else if summary.ChangedItems > 0 {
+		log.Printf("shift %s updated %d future schedule items, revision=%d version=%s", updated.Code, summary.ChangedItems, summary.NewRevision, summary.VersionID)
 	}
 	http.Redirect(w, r, "/shifts", http.StatusSeeOther)
 }
@@ -261,6 +289,7 @@ func (a *App) handleSchedule(w http.ResponseWriter, r *http.Request) {
 	data.Active = active
 	year, month, selected := a.resolveCalendarRequest(r, data.NowYear, data.NowMonth, data.NowDate)
 	a.fillCalendar(&data, year, month, selected, active.Items)
+	a.fillDayStatuses(&data, active.Items)
 	data.SelectedDayItems = a.Store.BuildScheduleItemStatuses(filterItemsByDate(active.Items, selected))
 	a.render(w, "schedule", data)
 }
@@ -330,6 +359,7 @@ func (a *App) renderError(w http.ResponseWriter, title, errMsg string) {
 
 func (a *App) handleApprovals(w http.ResponseWriter, r *http.Request) {
 	data := a.basePage("审批记录")
+	data.Users, _ = a.Store.LoadUsers()
 	approvals, err := a.Store.ListApprovals()
 	if err != nil {
 		data.Error = err.Error()
@@ -345,12 +375,26 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 	if date == "" {
 		date = time.Now().In(a.Loc).Format("2006-01-02")
 	}
-	items, err := a.Store.LoadHistoryDay(date)
+	selectedTime, err := time.ParseInLocation("2006-01-02", date, a.Loc)
+	if err != nil {
+		selectedTime = time.Now().In(a.Loc)
+		date = selectedTime.Format("2006-01-02")
+	}
+	year := parseQueryInt(r, "year", selectedTime.Year())
+	month := parseQueryInt(r, "month", int(selectedTime.Month()))
+	items, err := a.Store.LoadHistoryMonth(year, month)
+	if err != nil {
+		data.Error = err.Error()
+	}
+	dayItems, err := a.Store.LoadHistoryDay(date)
 	if err != nil {
 		data.Error = err.Error()
 	}
 	data.HistoryDate = date
-	data.History = a.Store.BuildScheduleItemStatuses(items)
+	data.History = a.Store.BuildScheduleItemStatuses(dayItems)
+	a.fillCalendar(&data, year, month, date, items)
+	a.fillDayStatuses(&data, items)
+	data.SelectedDayItems = data.History
 	a.render(w, "history", data)
 }
 
@@ -383,6 +427,15 @@ func (a *App) fillCalendar(data *PageData, year int, month int, selected string,
 	data.CalendarDays = buildCalendarDays(year, month, selected, data.NowDate, items, a.Loc)
 }
 
+func (a *App) fillDayStatuses(data *PageData, items []ScheduleItem) {
+	statuses := a.Store.BuildScheduleItemStatuses(items)
+	byDate := map[string][]ScheduleItemStatus{}
+	for _, item := range statuses {
+		byDate[item.Date] = append(byDate[item.Date], item)
+	}
+	data.DayStatus = byDate
+}
+
 func buildCalendarDays(year int, month int, selected string, today string, items []ScheduleItem, loc *time.Location) []CalendarDay {
 	byDate := map[string][]ScheduleItem{}
 	for _, item := range items {
@@ -399,7 +452,8 @@ func buildCalendarDays(year int, month int, selected string, today string, items
 		date := d.Format("2006-01-02")
 		dayItems := append([]ScheduleItem(nil), byDate[date]...)
 		sortScheduleItems(dayItems)
-		days = append(days, CalendarDay{Date: date, Day: d.Day(), IsCurrentMonth: int(d.Month()) == month, IsToday: date == today, IsSelected: date == selected, Items: dayItems})
+		isWeekend := d.Weekday() == time.Saturday || d.Weekday() == time.Sunday
+		days = append(days, CalendarDay{Date: date, Day: d.Day(), IsCurrentMonth: int(d.Month()) == month, IsToday: date == today, IsSelected: date == selected, IsWeekend: isWeekend, Items: dayItems})
 	}
 	return days
 }

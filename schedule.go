@@ -137,15 +137,43 @@ func makeShiftTime(date time.Time, shift Shift, loc *time.Location) (time.Time, 
 	}
 	start := time.Date(date.Year(), date.Month(), date.Day(), startHour, startMin, 0, 0, loc)
 	var end time.Time
-	if shift.End == "24:00" {
+	if strings.TrimSpace(shift.End) == "24:00" {
 		end = time.Date(date.Year(), date.Month(), date.Day()+1, 0, 0, 0, 0, loc)
 	} else {
 		end = time.Date(date.Year(), date.Month(), date.Day(), endHour, endMin, 0, 0, loc)
 	}
-	if shift.CrossDay || !end.After(start) {
+	if !end.After(start) {
 		end = end.Add(24 * time.Hour)
 	}
 	return start, end, nil
+}
+
+func deriveCrossDay(start, end string) bool {
+	if strings.TrimSpace(end) == "24:00" {
+		return true
+	}
+	sh, sm, err1 := parseClock(start)
+	eh, em, err2 := parseClock(end)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return eh*60+em <= sh*60+sm
+}
+
+func normalizeShift(sh Shift) (Shift, error) {
+	sh.Code = sanitizeFileName(strings.TrimSpace(sh.Code))
+	sh.Name = strings.TrimSpace(sh.Name)
+	sh.ShortName = strings.TrimSpace(sh.ShortName)
+	sh.Start = strings.TrimSpace(sh.Start)
+	sh.End = strings.TrimSpace(sh.End)
+	if sh.Code == "" || sh.Name == "" || sh.ShortName == "" || sh.Start == "" || sh.End == "" {
+		return sh, fmt.Errorf("班次编码、名称、简称、开始和结束时间都不能为空")
+	}
+	if _, _, err := makeShiftTime(time.Now(), sh, time.Local); err != nil {
+		return sh, err
+	}
+	sh.CrossDay = deriveCrossDay(sh.Start, sh.End)
+	return sh, nil
 }
 
 func parseClock(s string) (int, int, error) {
@@ -205,6 +233,19 @@ func newID(prefix string) string {
 	buf := make([]byte, 4)
 	_, _ = rand.Read(buf)
 	return fmt.Sprintf("%s_%s_%s", prefix, time.Now().Format("20060102_150405"), hex.EncodeToString(buf))
+}
+
+func newVersionID(revision int) string {
+	buf := make([]byte, 3)
+	_, _ = rand.Read(buf)
+	return fmt.Sprintf("version-%d-%s", revision, hex.EncodeToString(buf))
+}
+
+func compactID(s string) string {
+	if len(s) <= 14 {
+		return s
+	}
+	return s[:10] + "..." + s[len(s)-4:]
 }
 
 func containsInt64(vals []int64, target int64) bool {

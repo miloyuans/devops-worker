@@ -52,13 +52,32 @@ func (s *Storage) Init() error {
 func (s *Storage) ensureDefaultShifts() error {
 	path := filepath.Join(s.Dir, "config", "shifts.json")
 	if fileExists(path) {
+		shifts, err := s.LoadShifts()
+		if err != nil {
+			return err
+		}
+		changed := false
+		for i := range shifts {
+			cross := deriveCrossDay(shifts[i].Start, shifts[i].End)
+			if shifts[i].CrossDay != cross {
+				shifts[i].CrossDay = cross
+				changed = true
+			}
+			if !shifts[i].Enabled {
+				// Existing files keep their explicit disabled state. New defaults below are enabled.
+				continue
+			}
+		}
+		if changed {
+			return writeJSONAtomic(path, ShiftConfig{Shifts: shifts})
+		}
 		return nil
 	}
 	cfg := ShiftConfig{Shifts: []Shift{
-		{Code: "morning", Name: "早班", ShortName: "早", Start: "09:00", End: "18:00", Enabled: true},
-		{Code: "middle", Name: "中班", ShortName: "中", Start: "15:00", End: "24:00", Enabled: true},
-		{Code: "night", Name: "晚班", ShortName: "晚", Start: "00:00", End: "09:00", Enabled: true},
-		{Code: "normal", Name: "正常班", ShortName: "正常", Start: "09:00", End: "18:00", Enabled: true},
+		{Code: "morning", Name: "早班", ShortName: "早", Start: "09:00", End: "18:00", CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true},
+		{Code: "middle", Name: "中班", ShortName: "中", Start: "15:00", End: "24:00", CrossDay: deriveCrossDay("15:00", "24:00"), Enabled: true},
+		{Code: "night", Name: "晚班", ShortName: "晚", Start: "00:00", End: "09:00", CrossDay: deriveCrossDay("00:00", "09:00"), Enabled: true},
+		{Code: "normal", Name: "正常班", ShortName: "正常", Start: "09:00", End: "18:00", CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true},
 	}}
 	return writeJSONAtomic(path, cfg)
 }
@@ -74,9 +93,17 @@ func (s *Storage) ensureDefaultUsers() error {
 func (s *Storage) ensureDefaultActive() error {
 	path := filepath.Join(s.Dir, "schedules", "active.json")
 	if fileExists(path) {
+		var active ActiveSchedule
+		if err := readJSON(path, &active); err != nil {
+			return err
+		}
+		if active.VersionID == "" {
+			active.VersionID = newVersionID(active.Revision)
+			return writeJSONAtomic(path, active)
+		}
 		return nil
 	}
-	return writeJSONAtomic(path, ActiveSchedule{Revision: 0, Items: []ScheduleItem{}})
+	return writeJSONAtomic(path, ActiveSchedule{Revision: 0, VersionID: newVersionID(0), Items: []ScheduleItem{}})
 }
 
 func (s *Storage) ensureDefaultReminderState() error {
@@ -158,7 +185,13 @@ func (s *Storage) SaveUsers(users []StaffUser) error {
 func (s *Storage) LoadActive() (ActiveSchedule, error) {
 	var active ActiveSchedule
 	err := readJSON(filepath.Join(s.Dir, "schedules", "active.json"), &active)
-	return active, err
+	if err != nil {
+		return active, err
+	}
+	if active.VersionID == "" {
+		active.VersionID = newVersionID(active.Revision)
+	}
+	return active, nil
 }
 
 func (s *Storage) SaveActiveLocked(active ActiveSchedule) error {
@@ -230,6 +263,7 @@ func (s *Storage) Approve(id string, reviewerID int64) (*Approval, error) {
 		now := time.Now().Format(time.RFC3339)
 		newActive := ActiveSchedule{
 			Revision:         approval.NewRevision,
+			VersionID:        newVersionID(approval.NewRevision),
 			EffectiveAt:      now,
 			ApprovedBy:       reviewerID,
 			SourceApprovalID: approval.ID,
@@ -345,6 +379,35 @@ func (s *Storage) LoadHistoryDay(date string) ([]ScheduleItem, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return []ScheduleItem{}, nil
 		}
+		return nil, err
+	}
+	sortScheduleItems(items)
+	return items, nil
+}
+
+func (s *Storage) LoadHistoryMonth(year int, month int) ([]ScheduleItem, error) {
+	if month < 1 || month > 12 {
+		return []ScheduleItem{}, nil
+	}
+	dir := filepath.Join(s.Dir, "history", fmt.Sprintf("%04d", year), fmt.Sprintf("%02d", month))
+	var items []ScheduleItem
+	if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return []ScheduleItem{}, nil
+		}
+		return nil, err
+	}
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
+			return nil
+		}
+		var dayItems []ScheduleItem
+		if err := readJSON(path, &dayItems); err == nil {
+			items = append(items, dayItems...)
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	sortScheduleItems(items)
@@ -486,6 +549,74 @@ func (s *Storage) BuildScheduleItemStatuses(items []ScheduleItem) []ScheduleItem
 		out = append(out, status)
 	}
 	return out
+}
+
+func (s *Storage) NotificationTriggeredForItem(item ScheduleItem) bool {
+	state, err := s.LoadNotifications()
+	if err != nil {
+		return false
+	}
+	for _, rec := range state.Records {
+		if rec.Date == item.Date && rec.StaffID == item.StaffID && rec.ShiftCode == item.ShiftCode {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Storage) UpdateFutureItemsForShift(shift Shift, loc *time.Location) (ShiftUpdateSummary, error) {
+	var summary ShiftUpdateSummary
+	err := s.WithLock(func() error {
+		active, err := s.LoadActive()
+		if err != nil {
+			return err
+		}
+		now := time.Now().In(loc)
+		changed := 0
+		for i := range active.Items {
+			item := active.Items[i]
+			if item.ShiftCode != shift.Code {
+				continue
+			}
+			oldStart, err := time.Parse(time.RFC3339, item.StartTime)
+			if err != nil {
+				continue
+			}
+			if oldStart.In(loc).Before(now) || s.NotificationTriggeredForItem(item) {
+				continue
+			}
+			date, err := time.ParseInLocation("2006-01-02", item.Date, loc)
+			if err != nil {
+				continue
+			}
+			start, end, err := makeShiftTime(date, shift, loc)
+			if err != nil {
+				return err
+			}
+			active.Items[i].ShiftName = shift.Name
+			active.Items[i].ShiftShortName = shift.ShortName
+			active.Items[i].StartTime = start.Format(time.RFC3339)
+			active.Items[i].EndTime = end.Format(time.RFC3339)
+			changed++
+		}
+		if changed == 0 {
+			summary = ShiftUpdateSummary{ChangedItems: 0, NewRevision: active.Revision, VersionID: active.VersionID}
+			return nil
+		}
+		active.Revision++
+		active.VersionID = newVersionID(active.Revision)
+		active.EffectiveAt = time.Now().Format(time.RFC3339)
+		active.SourceApprovalID = "shift_update"
+		if err := s.SaveActiveLocked(active); err != nil {
+			return err
+		}
+		if err := s.writeByDayAndHistoryLocked(active); err != nil {
+			return err
+		}
+		summary = ShiftUpdateSummary{ChangedItems: changed, NewRevision: active.Revision, VersionID: active.VersionID}
+		return nil
+	})
+	return summary, err
 }
 
 func readJSON(path string, v any) error {

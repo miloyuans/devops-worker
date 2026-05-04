@@ -65,14 +65,15 @@ type ScheduleItem struct {
 
 type ScheduleItemStatus struct {
 	ScheduleItem
-	NotifyStatus      string
-	NotifyStatusLabel string
-	ReadStatus        string
-	ReadStatusLabel   string
+	NotifyStatus      string `json:"notify_status"`
+	NotifyStatusLabel string `json:"notify_status_label"`
+	ReadStatus        string `json:"read_status"`
+	ReadStatusLabel   string `json:"read_status_label"`
 }
 
 type ActiveSchedule struct {
 	Revision         int            `json:"revision"`
+	VersionID        string         `json:"version_id"`
 	EffectiveAt      string         `json:"effective_at"`
 	ApprovedBy       int64          `json:"approved_by"`
 	SourceApprovalID string         `json:"source_approval_id"`
@@ -126,7 +127,14 @@ type CalendarDay struct {
 	IsCurrentMonth bool
 	IsToday        bool
 	IsSelected     bool
+	IsWeekend      bool
 	Items          []ScheduleItem
+}
+
+type ShiftUpdateSummary struct {
+	ChangedItems int
+	NewRevision  int
+	VersionID    string
 }
 
 type PageData struct {
@@ -150,6 +158,7 @@ type PageData struct {
 	CalendarDays      []CalendarDay
 	SelectedDate      string
 	SelectedDayItems  []ScheduleItemStatus
+	DayStatus         map[string][]ScheduleItemStatus
 	CalendarPrevYear  int
 	CalendarPrevMonth int
 	CalendarNextYear  int
