@@ -64,14 +64,26 @@ func (a *App) render(w http.ResponseWriter, templateName string, data PageData) 
 func (a *App) basePage(title string) PageData {
 	now := time.Now().In(a.Loc)
 	return PageData{
-		Title:    title,
-		Config:   a.Cfg,
-		NowYear:  now.Year(),
-		NowMonth: int(now.Month()),
-		NowDate:  now.Format("2006-01-02"),
-		Months:   []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
-		WeekNums: []int{1, 2, 3, 4, 5},
+		Title:       title,
+		Config:      a.Cfg,
+		NowYear:     now.Year(),
+		NowMonth:    int(now.Month()),
+		NowDate:     now.Format("2006-01-02"),
+		Months:      []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
+		WeekNums:    []int{1, 2, 3, 4, 5},
+		TimeOptions: buildTimeOptions(),
 	}
+}
+
+func buildTimeOptions() []string {
+	options := make([]string, 0, 24*12+2)
+	for h := 0; h < 24; h++ {
+		for m := 0; m < 60; m += 5 {
+			options = append(options, fmt.Sprintf("%02d:%02d", h, m))
+		}
+	}
+	options = append(options, "24:00")
+	return options
 }
 
 func (a *App) handleDashboard(w http.ResponseWriter, r *http.Request) {

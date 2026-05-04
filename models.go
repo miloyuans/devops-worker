@@ -153,6 +153,7 @@ type PageData struct {
 	NowDate           string
 	Months            []int
 	WeekNums          []int
+	TimeOptions       []string
 	CalendarYear      int
 	CalendarMonth     int
 	CalendarDays      []CalendarDay
