@@ -49,15 +49,30 @@ func (s *Storage) Init() error {
 	return nil
 }
 
+func defaultShifts() []Shift {
+	return []Shift{
+		{Code: "morning", Name: "早班", ShortName: "早", Start: "09:00", End: "18:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true},
+		{Code: "middle", Name: "中班", ShortName: "中", Start: "15:00", End: "24:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("15:00", "24:00"), Enabled: true},
+		{Code: "night", Name: "晚班", ShortName: "晚", Start: "00:00", End: "09:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "09:00"), Enabled: true},
+		{Code: "normal", Name: "正常班", ShortName: "正常", Start: "09:00", End: "18:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true},
+		{Code: "rest", Name: "休息", ShortName: "休", Start: "00:00", End: "23:59", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "23:59"), Enabled: true},
+		{Code: "annual_leave", Name: "年假", ShortName: "年", Start: "00:00", End: "23:59", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "23:59"), Enabled: true},
+		{Code: "sick_leave", Name: "病假", ShortName: "病", Start: "00:00", End: "23:59", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "23:59"), Enabled: true},
+	}
+}
+
 func (s *Storage) ensureDefaultShifts() error {
 	path := filepath.Join(s.Dir, "config", "shifts.json")
+	defaults := defaultShifts()
 	if fileExists(path) {
 		shifts, err := s.LoadShifts()
 		if err != nil {
 			return err
 		}
 		changed := false
+		seen := map[string]bool{}
 		for i := range shifts {
+			seen[shifts[i].Code] = true
 			if shifts[i].Timezone == "" {
 				shifts[i].Timezone = DefaultShiftTimezone
 				changed = true
@@ -68,18 +83,18 @@ func (s *Storage) ensureDefaultShifts() error {
 				changed = true
 			}
 		}
+		for _, def := range defaults {
+			if !seen[def.Code] {
+				shifts = append(shifts, def)
+				changed = true
+			}
+		}
 		if changed {
 			return writeJSONAtomic(path, ShiftConfig{Shifts: shifts})
 		}
 		return nil
 	}
-	cfg := ShiftConfig{Shifts: []Shift{
-		{Code: "morning", Name: "早班", ShortName: "早", Start: "09:00", End: "18:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true},
-		{Code: "middle", Name: "中班", ShortName: "中", Start: "15:00", End: "24:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("15:00", "24:00"), Enabled: true},
-		{Code: "night", Name: "晚班", ShortName: "晚", Start: "00:00", End: "09:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "09:00"), Enabled: true},
-		{Code: "normal", Name: "正常班", ShortName: "正常", Start: "09:00", End: "18:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true},
-	}}
-	return writeJSONAtomic(path, cfg)
+	return writeJSONAtomic(path, ShiftConfig{Shifts: defaults})
 }
 
 func (s *Storage) ensureDefaultUsers() error {

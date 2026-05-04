@@ -334,17 +334,17 @@ func (a *App) handleScheduleSubmit(w http.ResponseWriter, r *http.Request) {
 	if createdBy == "" {
 		createdBy = "web"
 	}
-	rules, err := a.parseScheduleSubmitRules(r, year, month)
-	if err != nil {
-		a.renderError(w, "排班提交失败", err.Error())
-		return
-	}
 	users, err := a.Store.LoadUsers()
 	if err != nil {
 		a.renderError(w, "排班提交失败", err.Error())
 		return
 	}
 	shifts, err := a.Store.LoadShifts()
+	if err != nil {
+		a.renderError(w, "排班提交失败", err.Error())
+		return
+	}
+	rules, err := a.parseScheduleSubmitRules(r, year, month, shifts)
 	if err != nil {
 		a.renderError(w, "排班提交失败", err.Error())
 		return
@@ -376,7 +376,7 @@ func (a *App) handleScheduleSubmit(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/approvals", http.StatusSeeOther)
 }
 
-func (a *App) parseScheduleSubmitRules(r *http.Request, year int, month int) ([]ScheduleRule, error) {
+func (a *App) parseScheduleSubmitRules(r *http.Request, year int, month int, shifts []Shift) ([]ScheduleRule, error) {
 	draftRaw := strings.TrimSpace(r.FormValue("draft_rules"))
 	var rules []ScheduleRule
 	if draftRaw != "" {
@@ -384,13 +384,15 @@ func (a *App) parseScheduleSubmitRules(r *http.Request, year int, month int) ([]
 		if err := json.Unmarshal([]byte(draftRaw), &changes); err != nil {
 			return nil, fmt.Errorf("草稿内容格式错误: %w", err)
 		}
+		changes = ApplyAutoRestDefaults(changes, year, month, shifts, a.Loc)
 		rules = append(rules, DraftChangesToRules(changes, year, month)...)
 	} else {
 		dates := splitCSV(r.FormValue("selected_dates"))
 		staffIDs := r.Form["staff_ids"]
 		shiftCode := strings.TrimSpace(r.FormValue("shift_code"))
 		if len(dates) > 0 && len(staffIDs) > 0 && shiftCode != "" {
-			rules = append(rules, ScheduleRule{ID: newID("rule"), Year: year, Month: month, Dates: dates, StaffIDs: staffIDs, ShiftCode: shiftCode, Enabled: true})
+			changes := ApplyAutoRestDefaults([]ScheduleDraftChange{{Dates: dates, StaffIDs: staffIDs, ShiftCode: shiftCode}}, year, month, shifts, a.Loc)
+			rules = append(rules, DraftChangesToRules(changes, year, month)...)
 		}
 	}
 	if len(rules) == 0 {

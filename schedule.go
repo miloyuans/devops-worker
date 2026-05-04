@@ -184,6 +184,69 @@ func DraftChangesToRules(changes []ScheduleDraftChange, year int, month int) []S
 	return rules
 }
 
+func ApplyAutoRestDefaults(changes []ScheduleDraftChange, year int, month int, shifts []Shift, loc *time.Location) []ScheduleDraftChange {
+	explicit := NormalizeDraftChanges(changes)
+	if len(explicit) == 0 {
+		return explicit
+	}
+	shiftMap := map[string]Shift{}
+	for _, sh := range shifts {
+		shiftMap[sh.Code] = sh
+	}
+	rest, ok := shiftMap["rest"]
+	if !ok || rest.Code == "" {
+		return explicit
+	}
+	_ = rest
+	auto := []ScheduleDraftChange{}
+	seenMorning := map[string]bool{}
+	seenNormal := map[string]bool{}
+	for _, ch := range explicit {
+		for _, staffID := range ch.StaffIDs {
+			sh := shiftMap[ch.ShiftCode]
+			if isMorningShift(sh) {
+				seenMorning[staffID] = true
+			}
+			if isNormalShift(sh) {
+				seenNormal[staffID] = true
+			}
+		}
+	}
+	addRestDates := func(staffID string, includeSaturday bool) {
+		var dates []string
+		days := daysInMonth(year, time.Month(month))
+		for day := 1; day <= days; day++ {
+			d := time.Date(year, time.Month(month), day, 0, 0, 0, 0, loc)
+			if d.Weekday() == time.Sunday || (includeSaturday && d.Weekday() == time.Saturday) {
+				dates = append(dates, d.Format("2006-01-02"))
+			}
+		}
+		if len(dates) > 0 {
+			auto = append(auto, ScheduleDraftChange{Dates: dates, StaffIDs: []string{staffID}, ShiftCode: "rest"})
+		}
+	}
+	for staffID := range seenMorning {
+		addRestDates(staffID, true)
+	}
+	for staffID := range seenNormal {
+		if !seenMorning[staffID] {
+			addRestDates(staffID, false)
+		}
+	}
+	// Auto defaults are prepended so explicit user edits always win during normalization.
+	return NormalizeDraftChanges(append(auto, explicit...))
+}
+
+func isMorningShift(sh Shift) bool {
+	code := strings.ToLower(sh.Code)
+	return code == "morning" || strings.Contains(sh.Name, "早") || strings.Contains(sh.ShortName, "早")
+}
+
+func isNormalShift(sh Shift) bool {
+	code := strings.ToLower(sh.Code)
+	return code == "normal" || strings.Contains(sh.Name, "正常") || strings.Contains(sh.ShortName, "正常")
+}
+
 func makeShiftTime(date time.Time, shift Shift, loc *time.Location) (time.Time, time.Time, error) {
 	startHour, startMin, err := parseClock(shift.Start)
 	if err != nil {
