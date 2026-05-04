@@ -55,7 +55,7 @@ admin / change_me
 | `APPROVER_USER_IDS` | 指定审批人的 Telegram user ID，逗号分隔。只有这些用户点同意/拒绝才有效。 |
 | `WEB_ADDR` | Web 监听地址，默认 `:8080`。 |
 | `DATA_DIR` | 数据目录，默认 `./data`。容器部署时必须挂载持久卷。 |
-| `APP_TIMEZONE` | 排班时区，默认 `Asia/Shanghai`。 |
+| `APP_TIMEZONE` | Telegram 定时提醒的默认时区，默认 `Asia/Dubai`。Web 页面右上角可单独下拉选择展示时区，默认也是 `Asia/Dubai`。 |
 | `ADMIN_USERNAME` | Web Basic Auth 用户名。 |
 | `ADMIN_PASSWORD` | Web Basic Auth 密码。 |
 
@@ -100,7 +100,7 @@ admin / change_me
 data/config/shifts.json
 ```
 
-班次跨天状态不需要手动设置，服务会根据开始时间和结束时间自动判断。例如 `18:00-03:00` 或 `15:00-24:00` 会被识别为跨天。新增班次默认使用迪拜时区 `Asia/Dubai`，也可以在下拉框中选择其他时区。班次时间变更保存后，系统会自动扫描当前正式排班，更新未来且未触发通知的记录，并生成新的 `version-<revision>-<random>` 版本号。
+班次跨天状态不需要手动设置，服务会根据开始时间和结束时间自动判断。开始/结束时间支持精确到分钟。例如 `18:00-03:00` 或 `15:00-24:00` 会被识别为跨天。新增班次默认使用迪拜时区 `Asia/Dubai`，也可以在下拉框中选择其他时区。班次时间变更保存后，系统会自动扫描当前正式排班，更新未来且未触发通知的记录，并生成新的 `version-<revision>-<random>` 版本号。
 
 
 ## 排班草稿合并与并发审批

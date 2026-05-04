@@ -62,11 +62,43 @@ func (a *App) render(w http.ResponseWriter, templateName string, data PageData) 
 	_, _ = w.Write(buf.Bytes())
 }
 
-func (a *App) basePage(title string) PageData {
-	now := time.Now().In(a.Loc)
+func (a *App) requestTimezone(r *http.Request) string {
+	// Web display timezone is a user-facing preference. Default to Dubai so
+	// rendered dates do not silently inherit the server timezone.
+	tz := strings.TrimSpace(r.URL.Query().Get("tz"))
+	if tz != "" {
+		if _, err := time.LoadLocation(tz); err == nil {
+			return tz
+		}
+	}
+	if c, err := r.Cookie("devops_worker_tz"); err == nil {
+		if v := strings.TrimSpace(c.Value); v != "" {
+			if _, err := time.LoadLocation(v); err == nil {
+				return v
+			}
+		}
+	}
+	return DefaultShiftTimezone
+}
+
+func (a *App) requestLocation(r *http.Request) *time.Location {
+	tz := a.requestTimezone(r)
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		loc, _ = time.LoadLocation(DefaultShiftTimezone)
+	}
+	return loc
+}
+
+func (a *App) basePage(r *http.Request, title string) PageData {
+	loc := a.requestLocation(r)
+	tz := a.requestTimezone(r)
+	now := time.Now().In(loc)
+	cfg := a.Cfg
+	cfg.Timezone = tz
 	return PageData{
 		Title:           title,
-		Config:          a.Cfg,
+		Config:          cfg,
 		NowYear:         now.Year(),
 		NowMonth:        int(now.Month()),
 		NowDate:         now.Format("2006-01-02"),
@@ -78,9 +110,10 @@ func (a *App) basePage(title string) PageData {
 }
 
 func buildTimeOptions() []string {
-	options := make([]string, 0, 24*12+2)
+	// Minute-level precision. 24:00 is kept as an explicit end-of-day option.
+	options := make([]string, 0, 24*60+1)
 	for h := 0; h < 24; h++ {
-		for m := 0; m < 60; m += 5 {
+		for m := 0; m < 60; m++ {
 			options = append(options, fmt.Sprintf("%02d:%02d", h, m))
 		}
 	}
@@ -105,7 +138,7 @@ func (a *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	data := a.basePage("首页")
+	data := a.basePage(r, "首页")
 	active, err := a.Store.LoadActive()
 	if err != nil {
 		data.Error = err.Error()
@@ -113,16 +146,17 @@ func (a *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		data.Active = active
 	}
 	data.Users, _ = a.Store.LoadUsers()
-	year, month, selected := a.resolveCalendarRequest(r, data.NowYear, data.NowMonth, data.NowDate)
-	a.fillCalendar(&data, year, month, selected, active.Items)
-	a.fillDayStatuses(&data, active.Items)
+	loc := a.requestLocation(r)
+	year, month, selected := a.resolveCalendarRequestWithLoc(r, data.NowYear, data.NowMonth, data.NowDate, loc)
+	a.fillCalendarWithLoc(&data, year, month, selected, active.Items, loc)
+	a.fillDayStatusesWithLoc(&data, active.Items, loc)
 	items := filterItemsByDate(active.Items, selected)
-	data.SelectedDayItems = a.Store.BuildScheduleItemStatuses(items, a.Loc)
+	data.SelectedDayItems = a.Store.BuildScheduleItemStatuses(items, loc)
 	a.render(w, "dashboard", data)
 }
 
 func (a *App) handleUsers(w http.ResponseWriter, r *http.Request) {
-	data := a.basePage("用户管理")
+	data := a.basePage(r, "用户管理")
 	users, err := a.Store.LoadUsers()
 	if err != nil {
 		data.Error = err.Error()
@@ -196,7 +230,7 @@ func (a *App) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleShifts(w http.ResponseWriter, r *http.Request) {
-	data := a.basePage("班次设置")
+	data := a.basePage(r, "班次设置")
 	shifts, err := a.Store.LoadShifts()
 	if err != nil {
 		data.Error = err.Error()
@@ -308,17 +342,18 @@ func (a *App) handleShiftDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleSchedule(w http.ResponseWriter, r *http.Request) {
-	data := a.basePage("排班设置")
+	data := a.basePage(r, "排班设置")
 	users, _ := a.Store.LoadUsers()
 	shifts, _ := a.Store.LoadShifts()
 	active, _ := a.Store.LoadActive()
 	data.Users = users
 	data.Shifts = shifts
 	data.Active = active
-	year, month, selected := a.resolveCalendarRequest(r, data.NowYear, data.NowMonth, data.NowDate)
-	a.fillCalendar(&data, year, month, selected, active.Items)
-	a.fillDayStatuses(&data, active.Items)
-	data.SelectedDayItems = a.Store.BuildScheduleItemStatuses(filterItemsByDate(active.Items, selected), a.Loc)
+	loc := a.requestLocation(r)
+	year, month, selected := a.resolveCalendarRequestWithLoc(r, data.NowYear, data.NowMonth, data.NowDate, loc)
+	a.fillCalendarWithLoc(&data, year, month, selected, active.Items, loc)
+	a.fillDayStatusesWithLoc(&data, active.Items, loc)
+	data.SelectedDayItems = a.Store.BuildScheduleItemStatuses(filterItemsByDate(active.Items, selected), loc)
 	a.render(w, "schedule", data)
 }
 
@@ -344,12 +379,13 @@ func (a *App) handleScheduleSubmit(w http.ResponseWriter, r *http.Request) {
 		a.renderError(w, "排班提交失败", err.Error())
 		return
 	}
-	rules, err := a.parseScheduleSubmitRules(r, year, month, shifts)
+	loc := a.requestLocation(r)
+	rules, err := a.parseScheduleSubmitRulesWithLoc(r, year, month, shifts, loc)
 	if err != nil {
 		a.renderError(w, "排班提交失败", err.Error())
 		return
 	}
-	newItems, err := BuildScheduleItems(rules, users, shifts, a.Loc)
+	newItems, err := BuildScheduleItems(rules, users, shifts, loc)
 	if err != nil {
 		a.renderError(w, "排班提交失败", err.Error())
 		return
@@ -376,7 +412,7 @@ func (a *App) handleScheduleSubmit(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/approvals", http.StatusSeeOther)
 }
 
-func (a *App) parseScheduleSubmitRules(r *http.Request, year int, month int, shifts []Shift) ([]ScheduleRule, error) {
+func (a *App) parseScheduleSubmitRulesWithLoc(r *http.Request, year int, month int, shifts []Shift, loc *time.Location) ([]ScheduleRule, error) {
 	draftRaw := strings.TrimSpace(r.FormValue("draft_rules"))
 	var rules []ScheduleRule
 	if draftRaw != "" {
@@ -384,14 +420,14 @@ func (a *App) parseScheduleSubmitRules(r *http.Request, year int, month int, shi
 		if err := json.Unmarshal([]byte(draftRaw), &changes); err != nil {
 			return nil, fmt.Errorf("草稿内容格式错误: %w", err)
 		}
-		changes = ApplyAutoRestDefaults(changes, year, month, shifts, a.Loc)
+		changes = ApplyAutoRestDefaults(changes, year, month, shifts, loc)
 		rules = append(rules, DraftChangesToRules(changes, year, month)...)
 	} else {
 		dates := splitCSV(r.FormValue("selected_dates"))
 		staffIDs := r.Form["staff_ids"]
 		shiftCode := strings.TrimSpace(r.FormValue("shift_code"))
 		if len(dates) > 0 && len(staffIDs) > 0 && shiftCode != "" {
-			changes := ApplyAutoRestDefaults([]ScheduleDraftChange{{Dates: dates, StaffIDs: staffIDs, ShiftCode: shiftCode}}, year, month, shifts, a.Loc)
+			changes := ApplyAutoRestDefaults([]ScheduleDraftChange{{Dates: dates, StaffIDs: staffIDs, ShiftCode: shiftCode}}, year, month, shifts, loc)
 			rules = append(rules, DraftChangesToRules(changes, year, month)...)
 		}
 	}
@@ -402,13 +438,17 @@ func (a *App) parseScheduleSubmitRules(r *http.Request, year int, month int, shi
 }
 
 func (a *App) renderError(w http.ResponseWriter, title, errMsg string) {
-	data := a.basePage(title)
+	loc, _ := time.LoadLocation(DefaultShiftTimezone)
+	now := time.Now().In(loc)
+	cfg := a.Cfg
+	cfg.Timezone = DefaultShiftTimezone
+	data := PageData{Title: title, Config: cfg, NowYear: now.Year(), NowMonth: int(now.Month()), NowDate: now.Format("2006-01-02"), TimeOptions: buildTimeOptions(), TimezoneOptions: buildTimezoneOptions()}
 	data.Error = errMsg
 	a.render(w, "dashboard", data)
 }
 
 func (a *App) handleApprovals(w http.ResponseWriter, r *http.Request) {
-	data := a.basePage("审批记录")
+	data := a.basePage(r, "审批记录")
 	data.Users, _ = a.Store.LoadUsers()
 	approvals, err := a.Store.ListApprovals()
 	if err != nil {
@@ -420,14 +460,15 @@ func (a *App) handleApprovals(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
-	data := a.basePage("历史查询")
+	data := a.basePage(r, "历史查询")
+	loc := a.requestLocation(r)
 	date := r.URL.Query().Get("date")
 	if date == "" {
-		date = time.Now().In(a.Loc).Format("2006-01-02")
+		date = time.Now().In(loc).Format("2006-01-02")
 	}
-	selectedTime, err := time.ParseInLocation("2006-01-02", date, a.Loc)
+	selectedTime, err := time.ParseInLocation("2006-01-02", date, loc)
 	if err != nil {
-		selectedTime = time.Now().In(a.Loc)
+		selectedTime = time.Now().In(loc)
 		date = selectedTime.Format("2006-01-02")
 	}
 	year := parseQueryInt(r, "year", selectedTime.Year())
@@ -441,14 +482,14 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 		data.Error = err.Error()
 	}
 	data.HistoryDate = date
-	data.History = a.Store.BuildScheduleItemStatuses(dayItems, a.Loc)
-	a.fillCalendar(&data, year, month, date, items)
-	a.fillDayStatuses(&data, items)
+	data.History = a.Store.BuildScheduleItemStatuses(dayItems, loc)
+	a.fillCalendarWithLoc(&data, year, month, date, items, loc)
+	a.fillDayStatusesWithLoc(&data, items, loc)
 	data.SelectedDayItems = data.History
 	a.render(w, "history", data)
 }
 
-func (a *App) resolveCalendarRequest(r *http.Request, defaultYear, defaultMonth int, defaultDate string) (int, int, string) {
+func (a *App) resolveCalendarRequestWithLoc(r *http.Request, defaultYear, defaultMonth int, defaultDate string, loc *time.Location) (int, int, string) {
 	year := parseQueryInt(r, "year", defaultYear)
 	month := parseQueryInt(r, "month", defaultMonth)
 	if month < 1 || month > 12 {
@@ -458,7 +499,7 @@ func (a *App) resolveCalendarRequest(r *http.Request, defaultYear, defaultMonth 
 	if selected == "" {
 		selected = defaultDate
 	}
-	if t, err := time.ParseInLocation("2006-01-02", selected, a.Loc); err == nil {
+	if t, err := time.ParseInLocation("2006-01-02", selected, loc); err == nil {
 		if r.URL.Query().Get("year") == "" && r.URL.Query().Get("month") == "" {
 			year, month = t.Year(), int(t.Month())
 		}
@@ -466,19 +507,19 @@ func (a *App) resolveCalendarRequest(r *http.Request, defaultYear, defaultMonth 
 	return year, month, selected
 }
 
-func (a *App) fillCalendar(data *PageData, year int, month int, selected string, items []ScheduleItem) {
+func (a *App) fillCalendarWithLoc(data *PageData, year int, month int, selected string, items []ScheduleItem, loc *time.Location) {
 	data.CalendarYear = year
 	data.CalendarMonth = month
 	data.SelectedDate = selected
-	prev := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, a.Loc).AddDate(0, -1, 0)
-	next := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, a.Loc).AddDate(0, 1, 0)
+	prev := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, loc).AddDate(0, -1, 0)
+	next := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, loc).AddDate(0, 1, 0)
 	data.CalendarPrevYear, data.CalendarPrevMonth = prev.Year(), int(prev.Month())
 	data.CalendarNextYear, data.CalendarNextMonth = next.Year(), int(next.Month())
-	data.CalendarDays = buildCalendarDays(year, month, selected, data.NowDate, items, a.Loc)
+	data.CalendarDays = buildCalendarDays(year, month, selected, data.NowDate, items, loc)
 }
 
-func (a *App) fillDayStatuses(data *PageData, items []ScheduleItem) {
-	statuses := a.Store.BuildScheduleItemStatuses(items, a.Loc)
+func (a *App) fillDayStatusesWithLoc(data *PageData, items []ScheduleItem, loc *time.Location) {
+	statuses := a.Store.BuildScheduleItemStatuses(items, loc)
 	byDate := map[string][]ScheduleItemStatus{}
 	for _, item := range statuses {
 		byDate[item.Date] = append(byDate[item.Date], item)
