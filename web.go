@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,10 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/users/create", a.handleUserCreate)
 	mux.HandleFunc("/users/update", a.handleUserUpdate)
 	mux.HandleFunc("/users/delete", a.handleUserDelete)
+	mux.HandleFunc("/shifts", a.handleShifts)
+	mux.HandleFunc("/shifts/create", a.handleShiftCreate)
+	mux.HandleFunc("/shifts/update", a.handleShiftUpdate)
+	mux.HandleFunc("/shifts/delete", a.handleShiftDelete)
 	mux.HandleFunc("/schedule", a.handleSchedule)
 	mux.HandleFunc("/schedule/submit", a.handleScheduleSubmit)
 	mux.HandleFunc("/approvals", a.handleApprovals)
@@ -81,11 +86,10 @@ func (a *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	} else {
 		data.Active = active
 	}
-	today := time.Now().In(a.Loc).Format("2006-01-02")
-	items, err := a.Store.LoadDay(today)
-	if err == nil {
-		data.TodayItems = items
-	}
+	year, month, selected := a.resolveCalendarRequest(r, data.NowYear, data.NowMonth, data.NowDate)
+	a.fillCalendar(&data, year, month, selected, active.Items)
+	items := filterItemsByDate(active.Items, selected)
+	data.SelectedDayItems = a.Store.BuildScheduleItemStatuses(items)
 	a.render(w, "dashboard", data)
 }
 
@@ -163,12 +167,101 @@ func (a *App) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/users", http.StatusSeeOther)
 }
 
+func (a *App) handleShifts(w http.ResponseWriter, r *http.Request) {
+	data := a.basePage("班次设置")
+	shifts, err := a.Store.LoadShifts()
+	if err != nil {
+		data.Error = err.Error()
+	} else {
+		data.Shifts = shifts
+	}
+	a.render(w, "shifts", data)
+}
+
+func (a *App) handleShiftCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/shifts", http.StatusSeeOther)
+		return
+	}
+	_ = r.ParseForm()
+	code := sanitizeFileName(strings.TrimSpace(r.FormValue("code")))
+	name := strings.TrimSpace(r.FormValue("name"))
+	shortName := strings.TrimSpace(r.FormValue("short_name"))
+	start := strings.TrimSpace(r.FormValue("start"))
+	end := strings.TrimSpace(r.FormValue("end"))
+	if code == "" || name == "" || shortName == "" || start == "" || end == "" {
+		a.renderError(w, "班次设置", "班次编码、名称、简称、开始和结束时间都不能为空")
+		return
+	}
+	shifts, _ := a.Store.LoadShifts()
+	for _, sh := range shifts {
+		if sh.Code == code {
+			a.renderError(w, "班次设置", "班次编码已存在")
+			return
+		}
+	}
+	shifts = append(shifts, Shift{Code: code, Name: name, ShortName: shortName, Start: start, End: end, CrossDay: r.FormValue("cross_day") == "true", Enabled: true})
+	if err := a.Store.SaveShifts(shifts); err != nil {
+		log.Printf("save shift error: %v", err)
+	}
+	http.Redirect(w, r, "/shifts", http.StatusSeeOther)
+}
+
+func (a *App) handleShiftUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/shifts", http.StatusSeeOther)
+		return
+	}
+	_ = r.ParseForm()
+	code := r.FormValue("code")
+	shifts, _ := a.Store.LoadShifts()
+	for i := range shifts {
+		if shifts[i].Code == code {
+			shifts[i].Name = strings.TrimSpace(r.FormValue("name"))
+			shifts[i].ShortName = strings.TrimSpace(r.FormValue("short_name"))
+			shifts[i].Start = strings.TrimSpace(r.FormValue("start"))
+			shifts[i].End = strings.TrimSpace(r.FormValue("end"))
+			shifts[i].CrossDay = r.FormValue("cross_day") == "true"
+			shifts[i].Enabled = r.FormValue("enabled") == "true"
+		}
+	}
+	if err := a.Store.SaveShifts(shifts); err != nil {
+		log.Printf("update shift error: %v", err)
+	}
+	http.Redirect(w, r, "/shifts", http.StatusSeeOther)
+}
+
+func (a *App) handleShiftDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/shifts", http.StatusSeeOther)
+		return
+	}
+	_ = r.ParseForm()
+	code := r.FormValue("code")
+	shifts, _ := a.Store.LoadShifts()
+	out := make([]Shift, 0, len(shifts))
+	for _, sh := range shifts {
+		if sh.Code != code {
+			out = append(out, sh)
+		}
+	}
+	if err := a.Store.SaveShifts(out); err != nil {
+		log.Printf("delete shift error: %v", err)
+	}
+	http.Redirect(w, r, "/shifts", http.StatusSeeOther)
+}
+
 func (a *App) handleSchedule(w http.ResponseWriter, r *http.Request) {
 	data := a.basePage("排班设置")
 	users, _ := a.Store.LoadUsers()
 	shifts, _ := a.Store.LoadShifts()
+	active, _ := a.Store.LoadActive()
 	data.Users = users
 	data.Shifts = shifts
+	data.Active = active
+	year, month, selected := a.resolveCalendarRequest(r, data.NowYear, data.NowMonth, data.NowDate)
+	a.fillCalendar(&data, year, month, selected, active.Items)
+	data.SelectedDayItems = a.Store.BuildScheduleItemStatuses(filterItemsByDate(active.Items, selected))
 	a.render(w, "schedule", data)
 }
 
@@ -180,19 +273,18 @@ func (a *App) handleScheduleSubmit(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	year, _ := strconv.Atoi(r.FormValue("year"))
 	month, _ := strconv.Atoi(r.FormValue("month"))
-	weekNums := parseIntSlice(r.Form["week_nums"])
-	weekdays := parseIntSlice(r.Form["weekdays"])
+	dates := splitCSV(r.FormValue("selected_dates"))
 	staffIDs := r.Form["staff_ids"]
 	shiftCode := strings.TrimSpace(r.FormValue("shift_code"))
 	createdBy := strings.TrimSpace(r.FormValue("created_by"))
 	if createdBy == "" {
 		createdBy = "web"
 	}
-	if len(weekNums) == 0 || len(weekdays) == 0 || len(staffIDs) == 0 || shiftCode == "" {
-		a.renderError(w, "排班提交失败", "请至少选择周次、星期、用户和班次")
+	if len(dates) == 0 || len(staffIDs) == 0 || shiftCode == "" {
+		a.renderError(w, "排班提交失败", "请在日历中至少选择一个日期，并选择用户和班次")
 		return
 	}
-	rule := ScheduleRule{ID: newID("rule"), Year: year, Month: month, WeekNums: weekNums, Weekdays: weekdays, StaffIDs: staffIDs, ShiftCode: shiftCode, Enabled: true}
+	rule := ScheduleRule{ID: newID("rule"), Year: year, Month: month, Dates: dates, StaffIDs: staffIDs, ShiftCode: shiftCode, Enabled: true}
 	users, err := a.Store.LoadUsers()
 	if err != nil {
 		a.renderError(w, "排班提交失败", err.Error())
@@ -203,24 +295,24 @@ func (a *App) handleScheduleSubmit(w http.ResponseWriter, r *http.Request) {
 		a.renderError(w, "排班提交失败", err.Error())
 		return
 	}
-	items, err := BuildScheduleItems([]ScheduleRule{rule}, users, shifts, a.Loc)
+	newItems, err := BuildScheduleItems([]ScheduleRule{rule}, users, shifts, a.Loc)
 	if err != nil {
 		a.renderError(w, "排班提交失败", err.Error())
 		return
 	}
 	active, _ := a.Store.LoadActive()
-	html, err := RenderPreviewHTML("待生成", items, active.Revision, active.Revision+1)
+	previewItems := MergeScheduleItems(active.Items, newItems)
+	html, err := RenderPreviewHTML("待生成", previewItems, active.Revision, active.Revision+1)
 	if err != nil {
 		a.renderError(w, "排班提交失败", err.Error())
 		return
 	}
-	approval, err := a.Store.CreateApproval(createdBy, []ScheduleRule{rule}, items, html, a.Cfg.ApproverUserIDs)
+	approval, err := a.Store.CreateApproval(createdBy, []ScheduleRule{rule}, previewItems, html, a.Cfg.ApproverUserIDs)
 	if err != nil {
 		a.renderError(w, "排班提交失败", err.Error())
 		return
 	}
-	// 用最终审批 ID 重新渲染一次预览，方便附件显示准确 ID。
-	html, _ = RenderPreviewHTML(approval.ID, items, approval.BaseRevision, approval.NewRevision)
+	html, _ = RenderPreviewHTML(approval.ID, previewItems, approval.BaseRevision, approval.NewRevision)
 	_ = writeFileAtomic(filepath.Join(a.Cfg.DataDir, approval.PreviewHTML), []byte(html))
 	if a.TG != nil {
 		if err := a.TG.SendApproval(approval); err != nil {
@@ -258,8 +350,77 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 		data.Error = err.Error()
 	}
 	data.HistoryDate = date
-	data.History = items
+	data.History = a.Store.BuildScheduleItemStatuses(items)
 	a.render(w, "history", data)
+}
+
+func (a *App) resolveCalendarRequest(r *http.Request, defaultYear, defaultMonth int, defaultDate string) (int, int, string) {
+	year := parseQueryInt(r, "year", defaultYear)
+	month := parseQueryInt(r, "month", defaultMonth)
+	if month < 1 || month > 12 {
+		month = defaultMonth
+	}
+	selected := r.URL.Query().Get("date")
+	if selected == "" {
+		selected = defaultDate
+	}
+	if t, err := time.ParseInLocation("2006-01-02", selected, a.Loc); err == nil {
+		if r.URL.Query().Get("year") == "" && r.URL.Query().Get("month") == "" {
+			year, month = t.Year(), int(t.Month())
+		}
+	}
+	return year, month, selected
+}
+
+func (a *App) fillCalendar(data *PageData, year int, month int, selected string, items []ScheduleItem) {
+	data.CalendarYear = year
+	data.CalendarMonth = month
+	data.SelectedDate = selected
+	prev := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, a.Loc).AddDate(0, -1, 0)
+	next := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, a.Loc).AddDate(0, 1, 0)
+	data.CalendarPrevYear, data.CalendarPrevMonth = prev.Year(), int(prev.Month())
+	data.CalendarNextYear, data.CalendarNextMonth = next.Year(), int(next.Month())
+	data.CalendarDays = buildCalendarDays(year, month, selected, data.NowDate, items, a.Loc)
+}
+
+func buildCalendarDays(year int, month int, selected string, today string, items []ScheduleItem, loc *time.Location) []CalendarDay {
+	byDate := map[string][]ScheduleItem{}
+	for _, item := range items {
+		byDate[item.Date] = append(byDate[item.Date], item)
+	}
+	first := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, loc)
+	startOffset := (int(first.Weekday()) + 6) % 7
+	start := first.AddDate(0, 0, -startOffset)
+	last := time.Date(year, time.Month(month)+1, 0, 0, 0, 0, 0, loc)
+	endOffset := 6 - ((int(last.Weekday()) + 6) % 7)
+	end := last.AddDate(0, 0, endOffset)
+	var days []CalendarDay
+	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
+		date := d.Format("2006-01-02")
+		dayItems := append([]ScheduleItem(nil), byDate[date]...)
+		sortScheduleItems(dayItems)
+		days = append(days, CalendarDay{Date: date, Day: d.Day(), IsCurrentMonth: int(d.Month()) == month, IsToday: date == today, IsSelected: date == selected, Items: dayItems})
+	}
+	return days
+}
+
+func filterItemsByDate(items []ScheduleItem, date string) []ScheduleItem {
+	var out []ScheduleItem
+	for _, item := range items {
+		if item.Date == date {
+			out = append(out, item)
+		}
+	}
+	sortScheduleItems(out)
+	return out
+}
+
+func parseQueryInt(r *http.Request, key string, fallback int) int {
+	v, err := strconv.Atoi(r.URL.Query().Get(key))
+	if err != nil {
+		return fallback
+	}
+	return v
 }
 
 func parseFormInt64(s string) int64 {
@@ -279,6 +440,21 @@ func parseIntSlice(vals []string) []int {
 			out = append(out, n)
 		}
 	}
+	return out
+}
+
+func splitCSV(s string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, raw := range strings.Split(s, ",") {
+		v := strings.TrimSpace(raw)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	sort.Strings(out)
 	return out
 }
 

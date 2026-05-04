@@ -323,6 +323,14 @@ func (t *TelegramService) handleCallback(cq *telegramCallbackQuery) {
 		}
 		t.answerCallback(cq.ID, "已拒绝，本次策略未生效", true)
 		t.replyToCallbackMessage(cq, fmt.Sprintf("❌ 审批已拒绝，策略未生效\n审批ID: %s\n审批人: %d", approval.ID, reviewerID))
+	case "read":
+		rec, err := t.Store.MarkNotificationRead(approvalID, reviewerID)
+		if err != nil {
+			t.answerCallback(cq.ID, "确认失败: "+err.Error(), true)
+			return
+		}
+		t.answerCallback(cq.ID, "已记录已读", false)
+		t.replyToCallbackMessage(cq, fmt.Sprintf("✅ 已读确认\n员工: %s\n日期: %s\n班次: %s", rec.StaffName, rec.Date, rec.ShiftName))
 	default:
 		t.answerCallback(cq.ID, "未知操作", true)
 	}
@@ -399,18 +407,35 @@ func (t *TelegramService) checkAndNotify() {
 			continue
 		}
 		for _, chatID := range t.Cfg.GroupChatIDs {
-			key := fmt.Sprintf("%d|%s|%s|%s", chatID, item.StaffID, item.ShiftCode, item.StartTime)
-			ok, err := t.Store.MarkReminderIfNeeded(key)
-			if err != nil || !ok {
+			key := notificationKey(item, chatID)
+			if t.Store.NotificationAlreadySent(key) {
 				continue
+			}
+			record := NotificationRecord{
+				ID:             hashID("ntf", key),
+				Key:            key,
+				ItemKey:        notificationItemKey(item),
+				Date:           item.Date,
+				StaffID:        item.StaffID,
+				StaffName:      item.StaffName,
+				ShiftCode:      item.ShiftCode,
+				ShiftName:      item.ShiftName,
+				TelegramUserID: item.TelegramUserID,
+				ChatID:         chatID,
+				SentAt:         time.Now().Format(time.RFC3339),
 			}
 			mention := html.EscapeString(item.StaffName)
 			if item.TelegramUserID > 0 {
 				mention = fmt.Sprintf("<a href=\"tg://user?id=%d\">%s</a>", item.TelegramUserID, html.EscapeString(item.StaffName))
 			}
 			body := fmt.Sprintf("⏰ <b>上班提醒</b>\n\n员工: %s\n班次: %s\n时间: %s\n\n还有 30 分钟开始值班，请注意交接。", mention, html.EscapeString(item.ShiftName), html.EscapeString(formatClock(item.StartTime)))
-			if err := t.sendMessage(chatID, t.getThreadID(chatID, 0), body, "HTML"); err != nil {
+			replyMarkup := map[string]any{"inline_keyboard": [][]map[string]string{{{"text": "我已读", "callback_data": "read:" + record.ID}}}}
+			if err := t.sendMessageWithMarkup(chatID, t.getThreadID(chatID, 0), body, "HTML", replyMarkup); err != nil {
 				log.Printf("send reminder failed: %v", err)
+				continue
+			}
+			if _, err := t.Store.RecordNotificationSent(record); err != nil {
+				log.Printf("record notification failed: %v", err)
 			}
 		}
 	}
@@ -427,6 +452,10 @@ func (t *TelegramService) getThreadID(chatID int64, msgThreadID int) int {
 }
 
 func (t *TelegramService) sendMessage(chatID int64, threadID int, text string, parseMode string) error {
+	return t.sendMessageWithMarkup(chatID, threadID, text, parseMode, nil)
+}
+
+func (t *TelegramService) sendMessageWithMarkup(chatID int64, threadID int, text string, parseMode string, replyMarkup any) error {
 	vals := url.Values{}
 	vals.Set("chat_id", strconv.FormatInt(chatID, 10))
 	vals.Set("text", text)
@@ -435,6 +464,10 @@ func (t *TelegramService) sendMessage(chatID int64, threadID int, text string, p
 	}
 	if threadID > 0 {
 		vals.Set("message_thread_id", strconv.Itoa(threadID))
+	}
+	if replyMarkup != nil {
+		rm, _ := json.Marshal(replyMarkup)
+		vals.Set("reply_markup", string(rm))
 	}
 	var resp telegramAPIResponse[json.RawMessage]
 	if err := t.postForm("sendMessage", vals, &resp); err != nil {

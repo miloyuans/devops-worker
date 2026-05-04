@@ -1,12 +1,18 @@
 # devops-worker
 
-`devops-worker` 是一个 Web + Telegram 的排班审批服务：
+`devops-worker` 是一个 Web + Telegram 的排班审批服务。当前版本已经从“上传 xlsx 更新排班”升级为：
 
-- Web 页面创建用户、创建排班策略、查看历史排班。
-- 提交排班策略后只生成待审批草稿，不直接生效。
+- Web 科技务实风格控制台。
+- 首页默认展示当月日历，并默认选中今天。
+- 首页下方展示所选日期排班明细：用户名、班次、是否通知、是否已读。
+- 排班设置页默认展示当月日历，可点击一个或多个日期后弹窗选择用户和班次。
+- 新增班次设置页，可维护早班、中班、晚班、正常班或自定义班次。
+- 提交排班后只生成待审批草稿，不直接生效。
 - Telegram bot 向指定审批人发送 HTML 预览附件和“同意 / 拒绝”按钮。
 - 审批通过后才原子更新正式排班，并写入历史快照。
 - 审批拒绝不会更新正式排班。
+- 上班前 30 分钟 Telegram 自动提醒，并带“我已读”按钮。
+- Web 的“已读”状态来自值班人员点击“我已读”按钮；Telegram 不提供普通群消息真实阅读回执。
 - 通过文件锁和原子写入降低 Pod 滚动更新时的数据污染风险。
 
 ## 快速启动
@@ -18,8 +24,8 @@ set -a
 source .env
 set +a
 
-go mod tidy
-go run .
+CGO_ENABLED=0 go build -o devops-worker .
+./devops-worker
 ```
 
 然后打开：
@@ -61,6 +67,47 @@ admin / change_me
 
 审批人如果要接收私聊审批附件，需要先给 bot 发送 `/start`。如果私聊发送失败，程序仍会尝试向 `GROUP_CHAT_IDS` 群发送审批消息。
 
+## Web 页面
+
+| 页面 | 说明 |
+|---|---|
+| `/` | 首页日历，默认当月，默认选中今天；下方展示当天排班、通知状态、已读状态。 |
+| `/schedule` | 排班设置，日历点击多选日期，弹窗选择用户和班次，提交 Telegram 审批。 |
+| `/shifts` | 班次设置，维护班次编码、名称、简称、开始时间、结束时间、是否跨天、是否启用。 |
+| `/users` | 用户管理，维护用户名/别名和 Telegram User ID。 |
+| `/approvals` | 审批记录。 |
+| `/history?date=YYYY-MM-DD` | 按天查阅历史排班。 |
+| `/previews/<approval-id>.html` | 审批预览 HTML。 |
+
+## 班次定义
+
+默认初始化四种班次：
+
+- 早班：09:00-18:00
+- 中班：15:00-24:00
+- 晚班：00:00-09:00
+- 正常班：09:00-18:00
+
+可以在 Web 的 `/shifts` 页面维护，也可以直接修改：
+
+```text
+data/config/shifts.json
+```
+
+## 通知与已读状态
+
+通知状态：
+
+- `已通知`：系统已发送上班提醒。
+- `未通知`：尚未到提醒时间，或未发送成功。
+
+已读状态：
+
+- `已读`：值班人员点击了 Telegram 提醒消息里的“我已读”按钮。
+- `未读`：尚未点击确认。
+
+注意：Telegram Bot API 不提供普通群消息真实阅读回执，因此这里的“已读”是业务确认状态，不是 Telegram 客户端阅读回执。
+
 ## 数据目录
 
 ```text
@@ -75,8 +122,10 @@ data/
 ├── previews/*.html
 ├── history/YYYY/MM/YYYY-MM-DD.json
 ├── locks/*.lock
-└── meta/reminders.json
+└── meta/notifications.json
 ```
+
+旧版本的 `meta/reminders.json` 仍会初始化保留，但新版本通知状态主要使用 `meta/notifications.json`。
 
 ## Kubernetes / Docker 注意事项
 
@@ -97,28 +146,3 @@ volumeMounts:
   - name: schedule-data
     mountPath: /app/data
 ```
-
-## 班次定义
-
-默认初始化四种班次：
-
-- 早班：09:00-18:00
-- 中班：15:00-24:00
-- 晚班：00:00-09:00
-- 正常班：09:00-18:00
-
-可以修改：
-
-```text
-data/config/shifts.json
-```
-
-## Web 功能
-
-- `/`：今日排班与当前正式版本。
-- `/users`：用户管理。
-- `/schedule`：创建某月、某周、某星期、某班次排班策略并提交审批。
-- `/approvals`：审批记录。
-- `/history?date=YYYY-MM-DD`：按天查阅历史排班。
-- `/previews/<approval-id>.html`：审批预览 HTML。
-

@@ -19,6 +19,7 @@ type Shift struct {
 	Start     string `json:"start"`
 	End       string `json:"end"`
 	CrossDay  bool   `json:"cross_day"`
+	Enabled   bool   `json:"enabled"`
 }
 
 type ShiftConfig struct {
@@ -42,8 +43,9 @@ type ScheduleRule struct {
 	ID        string   `json:"id"`
 	Year      int      `json:"year"`
 	Month     int      `json:"month"`
-	WeekNums  []int    `json:"week_nums"`
-	Weekdays  []int    `json:"weekdays"`
+	Dates     []string `json:"dates,omitempty"`
+	WeekNums  []int    `json:"week_nums,omitempty"`
+	Weekdays  []int    `json:"weekdays,omitempty"`
 	StaffIDs  []string `json:"staff_ids"`
 	ShiftCode string   `json:"shift_code"`
 	Enabled   bool     `json:"enabled"`
@@ -59,6 +61,14 @@ type ScheduleItem struct {
 	ShiftShortName string `json:"shift_short_name"`
 	StartTime      string `json:"start_time"`
 	EndTime        string `json:"end_time"`
+}
+
+type ScheduleItemStatus struct {
+	ScheduleItem
+	NotifyStatus      string
+	NotifyStatusLabel string
+	ReadStatus        string
+	ReadStatusLabel   string
 }
 
 type ActiveSchedule struct {
@@ -86,25 +96,62 @@ type Approval struct {
 	StatusMessage string         `json:"status_message,omitempty"`
 }
 
+type NotificationRecord struct {
+	ID             string `json:"id"`
+	Key            string `json:"key"`
+	ItemKey        string `json:"item_key"`
+	Date           string `json:"date"`
+	StaffID        string `json:"staff_id"`
+	StaffName      string `json:"staff_name"`
+	ShiftCode      string `json:"shift_code"`
+	ShiftName      string `json:"shift_name"`
+	TelegramUserID int64  `json:"telegram_user_id"`
+	ChatID         int64  `json:"chat_id"`
+	SentAt         string `json:"sent_at"`
+	ReadAt         string `json:"read_at,omitempty"`
+	ReadBy         int64  `json:"read_by,omitempty"`
+}
+
+type NotificationState struct {
+	Records []NotificationRecord `json:"records"`
+}
+
 type ReminderState struct {
 	Sent map[string]bool `json:"sent"`
 }
 
+type CalendarDay struct {
+	Date           string
+	Day            int
+	IsCurrentMonth bool
+	IsToday        bool
+	IsSelected     bool
+	Items          []ScheduleItem
+}
+
 type PageData struct {
-	Title       string
-	Config      Config
-	Active      ActiveSchedule
-	TodayItems  []ScheduleItem
-	Users       []StaffUser
-	Shifts      []Shift
-	Approvals   []Approval
-	HistoryDate string
-	History     []ScheduleItem
-	Message     string
-	Error       string
-	NowYear     int
-	NowMonth    int
-	NowDate     string
-	Months      []int
-	WeekNums    []int
+	Title             string
+	Config            Config
+	Active            ActiveSchedule
+	Users             []StaffUser
+	Shifts            []Shift
+	Approvals         []Approval
+	HistoryDate       string
+	History           []ScheduleItemStatus
+	Message           string
+	Error             string
+	NowYear           int
+	NowMonth          int
+	NowDate           string
+	Months            []int
+	WeekNums          []int
+	CalendarYear      int
+	CalendarMonth     int
+	CalendarDays      []CalendarDay
+	SelectedDate      string
+	SelectedDayItems  []ScheduleItemStatus
+	CalendarPrevYear  int
+	CalendarPrevMonth int
+	CalendarNextYear  int
+	CalendarNextMonth int
 }

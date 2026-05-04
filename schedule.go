@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
 	"sort"
@@ -19,7 +20,9 @@ func BuildScheduleItems(rules []ScheduleRule, users []StaffUser, shifts []Shift,
 	}
 	shiftMap := map[string]Shift{}
 	for _, sh := range shifts {
-		shiftMap[sh.Code] = sh
+		if sh.Enabled || sh.Code != "" {
+			shiftMap[sh.Code] = sh
+		}
 	}
 	byKey := map[string]ScheduleItem{}
 	for _, rule := range rules {
@@ -33,16 +36,12 @@ func BuildScheduleItems(rules []ScheduleRule, users []StaffUser, shifts []Shift,
 		if rule.Year < 2000 || rule.Month < 1 || rule.Month > 12 {
 			return nil, fmt.Errorf("年月参数无效")
 		}
-		weekSet := intSet(rule.WeekNums)
-		weekdaySet := intSet(rule.Weekdays)
-		days := daysInMonth(rule.Year, time.Month(rule.Month))
-		for day := 1; day <= days; day++ {
-			weekNum := ((day - 1) / 7) + 1
-			date := time.Date(rule.Year, time.Month(rule.Month), day, 0, 0, 0, 0, loc)
-			weekday := goWeekdayToCN(date.Weekday())
-			if !weekSet[weekNum] || !weekdaySet[weekday] {
-				continue
-			}
+
+		dates, err := expandRuleDates(rule, loc)
+		if err != nil {
+			return nil, err
+		}
+		for _, date := range dates {
 			start, end, err := makeShiftTime(date, shift, loc)
 			if err != nil {
 				return nil, err
@@ -73,6 +72,58 @@ func BuildScheduleItems(rules []ScheduleRule, users []StaffUser, shifts []Shift,
 	}
 	sortScheduleItems(items)
 	return items, nil
+}
+
+func expandRuleDates(rule ScheduleRule, loc *time.Location) ([]time.Time, error) {
+	seen := map[string]bool{}
+	var dates []time.Time
+	if len(rule.Dates) > 0 {
+		for _, raw := range rule.Dates {
+			date, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(raw), loc)
+			if err != nil {
+				return nil, fmt.Errorf("日期格式无效 %q: %w", raw, err)
+			}
+			if date.Year() != rule.Year || int(date.Month()) != rule.Month {
+				return nil, fmt.Errorf("日期 %s 不属于 %04d-%02d", raw, rule.Year, rule.Month)
+			}
+			key := date.Format("2006-01-02")
+			if !seen[key] {
+				seen[key] = true
+				dates = append(dates, date)
+			}
+		}
+		sort.Slice(dates, func(i, j int) bool { return dates[i].Before(dates[j]) })
+		return dates, nil
+	}
+
+	weekSet := intSet(rule.WeekNums)
+	weekdaySet := intSet(rule.Weekdays)
+	days := daysInMonth(rule.Year, time.Month(rule.Month))
+	for day := 1; day <= days; day++ {
+		weekNum := ((day - 1) / 7) + 1
+		date := time.Date(rule.Year, time.Month(rule.Month), day, 0, 0, 0, 0, loc)
+		weekday := goWeekdayToCN(date.Weekday())
+		if weekSet[weekNum] && weekdaySet[weekday] {
+			dates = append(dates, date)
+		}
+	}
+	return dates, nil
+}
+
+func MergeScheduleItems(existing []ScheduleItem, updates []ScheduleItem) []ScheduleItem {
+	updateKeys := map[string]bool{}
+	for _, item := range updates {
+		updateKeys[item.Date+"|"+item.StaffID] = true
+	}
+	merged := make([]ScheduleItem, 0, len(existing)+len(updates))
+	for _, item := range existing {
+		if !updateKeys[item.Date+"|"+item.StaffID] {
+			merged = append(merged, item)
+		}
+	}
+	merged = append(merged, updates...)
+	sortScheduleItems(merged)
+	return merged
 }
 
 func makeShiftTime(date time.Time, shift Shift, loc *time.Location) (time.Time, time.Time, error) {
@@ -175,4 +226,17 @@ func sanitizeFileName(s string) string {
 		}
 	}
 	return b.String()
+}
+
+func notificationItemKey(item ScheduleItem) string {
+	return item.Date + "|" + item.StaffID + "|" + item.ShiftCode + "|" + item.StartTime
+}
+
+func notificationKey(item ScheduleItem, chatID int64) string {
+	return fmt.Sprintf("%s|%d", notificationItemKey(item), chatID)
+}
+
+func hashID(prefix, value string) string {
+	sum := sha1.Sum([]byte(value))
+	return prefix + "_" + hex.EncodeToString(sum[:])[:16]
 }

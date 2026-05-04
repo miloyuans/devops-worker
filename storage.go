@@ -43,6 +43,9 @@ func (s *Storage) Init() error {
 	if err := s.ensureDefaultReminderState(); err != nil {
 		return err
 	}
+	if err := s.ensureDefaultNotificationState(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -52,10 +55,10 @@ func (s *Storage) ensureDefaultShifts() error {
 		return nil
 	}
 	cfg := ShiftConfig{Shifts: []Shift{
-		{Code: "morning", Name: "早班", ShortName: "早", Start: "09:00", End: "18:00"},
-		{Code: "middle", Name: "中班", ShortName: "中", Start: "15:00", End: "24:00"},
-		{Code: "night", Name: "晚班", ShortName: "晚", Start: "00:00", End: "09:00"},
-		{Code: "normal", Name: "正常班", ShortName: "正常", Start: "09:00", End: "18:00"},
+		{Code: "morning", Name: "早班", ShortName: "早", Start: "09:00", End: "18:00", Enabled: true},
+		{Code: "middle", Name: "中班", ShortName: "中", Start: "15:00", End: "24:00", Enabled: true},
+		{Code: "night", Name: "晚班", ShortName: "晚", Start: "00:00", End: "09:00", Enabled: true},
+		{Code: "normal", Name: "正常班", ShortName: "正常", Start: "09:00", End: "18:00", Enabled: true},
 	}}
 	return writeJSONAtomic(path, cfg)
 }
@@ -82,6 +85,14 @@ func (s *Storage) ensureDefaultReminderState() error {
 		return nil
 	}
 	return writeJSONAtomic(path, ReminderState{Sent: map[string]bool{}})
+}
+
+func (s *Storage) ensureDefaultNotificationState() error {
+	path := filepath.Join(s.Dir, "meta", "notifications.json")
+	if fileExists(path) {
+		return nil
+	}
+	return writeJSONAtomic(path, NotificationState{Records: []NotificationRecord{}})
 }
 
 func (s *Storage) WithLock(fn func() error) error {
@@ -122,6 +133,12 @@ func (s *Storage) LoadShifts() ([]Shift, error) {
 		return nil, err
 	}
 	return cfg.Shifts, nil
+}
+
+func (s *Storage) SaveShifts(shifts []Shift) error {
+	return s.WithLock(func() error {
+		return writeJSONAtomic(filepath.Join(s.Dir, "config", "shifts.json"), ShiftConfig{Shifts: shifts})
+	})
 }
 
 func (s *Storage) LoadUsers() ([]StaffUser, error) {
@@ -371,6 +388,104 @@ func (s *Storage) MarkReminderIfNeeded(key string) (bool, error) {
 		return writeJSONAtomic(path, state)
 	})
 	return shouldSend, err
+}
+
+func (s *Storage) LoadNotifications() (NotificationState, error) {
+	var state NotificationState
+	path := filepath.Join(s.Dir, "meta", "notifications.json")
+	if err := readJSON(path, &state); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return NotificationState{Records: []NotificationRecord{}}, nil
+		}
+		return state, err
+	}
+	if state.Records == nil {
+		state.Records = []NotificationRecord{}
+	}
+	return state, nil
+}
+
+func (s *Storage) NotificationAlreadySent(key string) bool {
+	state, err := s.LoadNotifications()
+	if err != nil {
+		return false
+	}
+	for _, rec := range state.Records {
+		if rec.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Storage) RecordNotificationSent(record NotificationRecord) (bool, error) {
+	var created bool
+	err := s.WithLock(func() error {
+		path := filepath.Join(s.Dir, "meta", "notifications.json")
+		state := NotificationState{Records: []NotificationRecord{}}
+		_ = readJSON(path, &state)
+		for _, rec := range state.Records {
+			if rec.Key == record.Key {
+				created = false
+				return nil
+			}
+		}
+		state.Records = append(state.Records, record)
+		created = true
+		return writeJSONAtomic(path, state)
+	})
+	return created, err
+}
+
+func (s *Storage) MarkNotificationRead(recordID string, readerID int64) (*NotificationRecord, error) {
+	var updated *NotificationRecord
+	err := s.WithLock(func() error {
+		path := filepath.Join(s.Dir, "meta", "notifications.json")
+		state := NotificationState{Records: []NotificationRecord{}}
+		_ = readJSON(path, &state)
+		for i := range state.Records {
+			if state.Records[i].ID != recordID {
+				continue
+			}
+			if state.Records[i].TelegramUserID > 0 && state.Records[i].TelegramUserID != readerID {
+				return fmt.Errorf("当前 Telegram 用户不是该排班人员")
+			}
+			if state.Records[i].ReadAt == "" {
+				state.Records[i].ReadAt = time.Now().Format(time.RFC3339)
+				state.Records[i].ReadBy = readerID
+			}
+			updated = &state.Records[i]
+			return writeJSONAtomic(path, state)
+		}
+		return fmt.Errorf("通知记录不存在或已过期")
+	})
+	return updated, err
+}
+
+func (s *Storage) BuildScheduleItemStatuses(items []ScheduleItem) []ScheduleItemStatus {
+	state, _ := s.LoadNotifications()
+	byItem := map[string][]NotificationRecord{}
+	for _, rec := range state.Records {
+		byItem[rec.ItemKey] = append(byItem[rec.ItemKey], rec)
+	}
+	out := make([]ScheduleItemStatus, 0, len(items))
+	for _, item := range items {
+		status := ScheduleItemStatus{ScheduleItem: item, NotifyStatus: "off", NotifyStatusLabel: "未通知", ReadStatus: "off", ReadStatusLabel: "未读"}
+		recs := byItem[notificationItemKey(item)]
+		if len(recs) > 0 {
+			status.NotifyStatus = "ok"
+			status.NotifyStatusLabel = "已通知"
+		}
+		for _, rec := range recs {
+			if rec.ReadAt != "" {
+				status.ReadStatus = "ok"
+				status.ReadStatusLabel = "已读"
+				break
+			}
+		}
+		out = append(out, status)
+	}
+	return out
 }
 
 func readJSON(path string, v any) error {
