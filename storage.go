@@ -683,6 +683,86 @@ func (s *Storage) UpdateFutureItemsForShift(shift Shift, loc *time.Location) (Sh
 	return summary, err
 }
 
+func (s *Storage) SyncActiveItemsWithLatestShifts(loc *time.Location) (ShiftUpdateSummary, error) {
+	var summary ShiftUpdateSummary
+	err := s.WithLock(func() error {
+		active, err := s.LoadActive()
+		if err != nil {
+			return err
+		}
+		shifts, err := s.LoadShifts()
+		if err != nil {
+			return err
+		}
+		shiftMap := map[string]Shift{}
+		for _, sh := range shifts {
+			if sh.Code != "" {
+				shiftMap[sh.Code] = sh
+			}
+		}
+		now := time.Now()
+		changed := 0
+		for i := range active.Items {
+			item := active.Items[i]
+			shift, ok := shiftMap[item.ShiftCode]
+			if !ok {
+				continue
+			}
+			if s.NotificationTriggeredForItem(item) {
+				continue
+			}
+			shiftLoc := loc
+			if strings.TrimSpace(shift.Timezone) != "" {
+				if loaded, err := time.LoadLocation(strings.TrimSpace(shift.Timezone)); err == nil {
+					shiftLoc = loaded
+				}
+			}
+			date, err := time.ParseInLocation("2006-01-02", item.Date, shiftLoc)
+			if err != nil {
+				continue
+			}
+			// Only rewrite today/future items. The decision is based on the
+			// schedule date, not the stored historical start_time, so stale start
+			// clocks cannot cause missed future reminders.
+			today := time.Date(now.In(shiftLoc).Year(), now.In(shiftLoc).Month(), now.In(shiftLoc).Day(), 0, 0, 0, 0, shiftLoc)
+			if date.Before(today) {
+				continue
+			}
+			start, end, err := makeShiftTime(date, shift, loc)
+			if err != nil {
+				return err
+			}
+			newStart := start.Format(time.RFC3339)
+			newEnd := end.Format(time.RFC3339)
+			if active.Items[i].ShiftName == shift.Name && active.Items[i].ShiftShortName == shift.ShortName && active.Items[i].StartTime == newStart && active.Items[i].EndTime == newEnd {
+				continue
+			}
+			active.Items[i].ShiftName = shift.Name
+			active.Items[i].ShiftShortName = shift.ShortName
+			active.Items[i].StartTime = newStart
+			active.Items[i].EndTime = newEnd
+			changed++
+		}
+		if changed == 0 {
+			summary = ShiftUpdateSummary{ChangedItems: 0, NewRevision: active.Revision, VersionID: active.VersionID}
+			return nil
+		}
+		active.Revision++
+		active.VersionID = newVersionID(active.Revision)
+		active.EffectiveAt = time.Now().Format(time.RFC3339)
+		active.SourceApprovalID = "auto_shift_time_sync"
+		if err := s.SaveActiveLocked(active); err != nil {
+			return err
+		}
+		if err := s.writeByDayAndHistoryLocked(active); err != nil {
+			return err
+		}
+		summary = ShiftUpdateSummary{ChangedItems: changed, NewRevision: active.Revision, VersionID: active.VersionID}
+		return nil
+	})
+	return summary, err
+}
+
 func readJSON(path string, v any) error {
 	data, err := os.ReadFile(path)
 	if err != nil {

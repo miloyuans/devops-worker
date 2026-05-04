@@ -29,6 +29,7 @@ func main() {
 	}
 
 	app := &App{Cfg: cfg, Store: store, Loc: loc, TG: tg}
+	go startScheduleConsistencyScheduler(store, loc)
 	if tg != nil {
 		tg.StartPollingAndScheduler()
 	}
@@ -36,5 +37,27 @@ func main() {
 	log.Printf("Web server listening on %s", cfg.WebAddr)
 	if err := http.ListenAndServe(cfg.WebAddr, app.routes()); err != nil {
 		log.Fatalf("Web server stopped: %v", err)
+	}
+}
+
+func startScheduleConsistencyScheduler(store *Storage, loc *time.Location) {
+	if store == nil {
+		return
+	}
+	run := func() {
+		summary, err := store.SyncActiveItemsWithLatestShifts(loc)
+		if err != nil {
+			log.Printf("schedule consistency sync failed: %v", err)
+			return
+		}
+		if summary.ChangedItems > 0 {
+			log.Printf("schedule consistency sync updated %d active items, revision=%d version=%s", summary.ChangedItems, summary.NewRevision, summary.VersionID)
+		}
+	}
+	run()
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		run()
 	}
 }
