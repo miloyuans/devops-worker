@@ -19,6 +19,11 @@ func main() {
 	if err := store.Init(); err != nil {
 		log.Fatalf("初始化数据目录失败: %v", err)
 	}
+	if summary, err := store.RepairActiveSchedule(loc); err != nil {
+		log.Printf("repair active schedule failed: %v", err)
+	} else if summary.ChangedItems > 0 {
+		log.Printf("repair active schedule removed %d duplicate items, revision=%d version=%s", summary.ChangedItems, summary.NewRevision, summary.VersionID)
+	}
 
 	hostname, _ := os.Hostname()
 	log.Printf("devops-worker starting: pid=%d hostname=%s data_dir=%s web_addr=%s", os.Getpid(), hostname, cfg.DataDir, cfg.WebAddr)

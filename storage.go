@@ -228,6 +228,7 @@ func (s *Storage) LoadActive() (ActiveSchedule, error) {
 }
 
 func (s *Storage) SaveActiveLocked(active ActiveSchedule) error {
+	active.Items = NormalizeScheduleItems(active.Items)
 	return writeJSONAtomic(filepath.Join(s.Dir, "schedules", "active.json"), active)
 }
 
@@ -331,7 +332,7 @@ func (s *Storage) Approve(id string, reviewerID int64, loc *time.Location) (*App
 		if err != nil {
 			return err
 		}
-		finalItems := MergeScheduleItems(active.Items, updateItems)
+		finalItems := NormalizeScheduleItems(MergeScheduleItems(active.Items, updateItems))
 		now := time.Now().Format(time.RFC3339)
 		newRevision := active.Revision + 1
 		if html, err := RenderPreviewHTML(approval.ID, finalItems, active.Revision, newRevision); err == nil {
@@ -711,6 +712,126 @@ func (s *Storage) UpdateFutureItemsForShift(shift Shift, loc *time.Location) (Sh
 	return summary, err
 }
 
+func (s *Storage) RepairActiveSchedule(loc *time.Location) (ShiftUpdateSummary, error) {
+	var summary ShiftUpdateSummary
+	err := s.WithLock(func() error {
+		active, err := s.LoadActive()
+		if err != nil {
+			return err
+		}
+		oldCount := len(active.Items)
+		active.Items = NormalizeScheduleItems(active.Items)
+		newCount := len(active.Items)
+		if oldCount == newCount {
+			summary = ShiftUpdateSummary{ChangedItems: 0, NewRevision: active.Revision, VersionID: active.VersionID}
+			return nil
+		}
+		active.Revision++
+		active.VersionID = newVersionID(active.Revision)
+		active.EffectiveAt = time.Now().Format(time.RFC3339)
+		active.SourceApprovalID = "repair_duplicate_schedule_items"
+		if err := s.SaveActiveLocked(active); err != nil {
+			return err
+		}
+		if err := s.writeByDayAndHistoryLocked(active); err != nil {
+			return err
+		}
+		summary = ShiftUpdateSummary{ChangedItems: oldCount - newCount, NewRevision: active.Revision, VersionID: active.VersionID}
+		return nil
+	})
+	return summary, err
+}
+
+func (s *Storage) CleanupFutureItemsByUserOrShift(userID string, shiftCode string, loc *time.Location, reason string) (ShiftUpdateSummary, error) {
+	var summary ShiftUpdateSummary
+	err := s.WithLock(func() error {
+		active, err := s.LoadActive()
+		if err != nil {
+			return err
+		}
+		beforeCount := len(active.Items)
+		now := time.Now().In(loc)
+		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+		affectedDates := map[string]bool{}
+		kept := make([]ScheduleItem, 0, len(active.Items))
+		removed := 0
+		for _, item := range active.Items {
+			matched := false
+			if strings.TrimSpace(userID) != "" && item.StaffID == userID {
+				matched = true
+			}
+			if strings.TrimSpace(shiftCode) != "" && item.ShiftCode == shiftCode {
+				matched = true
+			}
+			if !matched {
+				kept = append(kept, item)
+				continue
+			}
+			itemDate, err := time.ParseInLocation("2006-01-02", item.Date, loc)
+			if err != nil {
+				kept = append(kept, item)
+				continue
+			}
+			if itemDate.Before(today) || s.NotificationTriggeredForItem(item) {
+				kept = append(kept, item)
+				continue
+			}
+			affectedDates[item.Date] = true
+			removed++
+		}
+		active.Items = NormalizeScheduleItems(kept)
+		dedupRemoved := beforeCount - removed - len(active.Items)
+		if removed == 0 && dedupRemoved == 0 {
+			summary = ShiftUpdateSummary{ChangedItems: 0, NewRevision: active.Revision, VersionID: active.VersionID}
+			return nil
+		}
+		active.Revision++
+		active.VersionID = newVersionID(active.Revision)
+		active.EffectiveAt = time.Now().Format(time.RFC3339)
+		if strings.TrimSpace(reason) == "" {
+			reason = "future_schedule_cleanup"
+		}
+		active.SourceApprovalID = reason
+		if err := s.SaveActiveLocked(active); err != nil {
+			return err
+		}
+		if err := s.writeByDayAndHistoryLocked(active); err != nil {
+			return err
+		}
+		if err := s.removeEmptyFutureDateFilesLocked(active, affectedDates, loc); err != nil {
+			return err
+		}
+		summary = ShiftUpdateSummary{ChangedItems: removed + dedupRemoved, NewRevision: active.Revision, VersionID: active.VersionID}
+		return nil
+	})
+	return summary, err
+}
+
+func (s *Storage) removeEmptyFutureDateFilesLocked(active ActiveSchedule, dates map[string]bool, loc *time.Location) error {
+	if len(dates) == 0 {
+		return nil
+	}
+	present := map[string]bool{}
+	for _, item := range active.Items {
+		present[item.Date] = true
+	}
+	now := time.Now().In(loc)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	for date := range dates {
+		if present[date] {
+			continue
+		}
+		itemDate, err := time.ParseInLocation("2006-01-02", date, loc)
+		if err != nil || itemDate.Before(today) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(s.Dir, "schedules", "by_day", sanitizeFileName(date)+".json"))
+		histPath := filepath.Join(s.Dir, "history", fmt.Sprintf("%04d", itemDate.Year()), fmt.Sprintf("%02d", int(itemDate.Month())), date+".json")
+		_ = os.Remove(histPath)
+	}
+	return nil
+}
+
 func (s *Storage) SyncActiveItemsWithLatestShifts(loc *time.Location) (ShiftUpdateSummary, error) {
 	var summary ShiftUpdateSummary
 	err := s.WithLock(func() error {
@@ -718,9 +839,20 @@ func (s *Storage) SyncActiveItemsWithLatestShifts(loc *time.Location) (ShiftUpda
 		if err != nil {
 			return err
 		}
+		beforeCount := len(active.Items)
+		users, err := s.LoadUsers()
+		if err != nil {
+			return err
+		}
 		shifts, err := s.LoadShifts()
 		if err != nil {
 			return err
+		}
+		userMap := map[string]StaffUser{}
+		for _, u := range users {
+			if u.ID != "" {
+				userMap[u.ID] = u
+			}
 		}
 		shiftMap := map[string]Shift{}
 		for _, sh := range shifts {
@@ -730,62 +862,80 @@ func (s *Storage) SyncActiveItemsWithLatestShifts(loc *time.Location) (ShiftUpda
 		}
 		now := time.Now()
 		changed := 0
-		for i := range active.Items {
-			item := active.Items[i]
-			shift, ok := shiftMap[item.ShiftCode]
-			if !ok {
-				continue
-			}
-			if s.NotificationTriggeredForItem(item) {
-				continue
-			}
-			shiftLoc := loc
-			if strings.TrimSpace(shift.Timezone) != "" {
+		removed := 0
+		affectedDates := map[string]bool{}
+		kept := make([]ScheduleItem, 0, len(active.Items))
+		for _, item := range active.Items {
+			shift, shiftOK := shiftMap[item.ShiftCode]
+			user, userOK := userMap[item.StaffID]
+			itemLoc := loc
+			if shiftOK && strings.TrimSpace(shift.Timezone) != "" {
 				if loaded, err := time.LoadLocation(strings.TrimSpace(shift.Timezone)); err == nil {
-					shiftLoc = loaded
+					itemLoc = loaded
 				}
 			}
-			date, err := time.ParseInLocation("2006-01-02", item.Date, shiftLoc)
+			date, err := time.ParseInLocation("2006-01-02", item.Date, itemLoc)
 			if err != nil {
+				kept = append(kept, item)
 				continue
 			}
-			// Only rewrite today/future items. The decision is based on the
-			// schedule date, not the stored historical start_time, so stale start
-			// clocks cannot cause missed future reminders.
-			today := time.Date(now.In(shiftLoc).Year(), now.In(shiftLoc).Month(), now.In(shiftLoc).Day(), 0, 0, 0, 0, shiftLoc)
-			if date.Before(today) {
+			today := time.Date(now.In(itemLoc).Year(), now.In(itemLoc).Month(), now.In(itemLoc).Day(), 0, 0, 0, 0, itemLoc)
+			futureOrToday := !date.Before(today)
+			notified := s.NotificationTriggeredForItem(item)
+
+			// Disabled/deleted users or shifts should disappear from future pages once
+			// they have not yet been notified. Historical and already-notified items
+			// are retained for auditability and user consistency.
+			if futureOrToday && !notified && (!userOK || !user.Enabled || !shiftOK || !shift.Enabled) {
+				affectedDates[item.Date] = true
+				removed++
 				continue
 			}
+
+			if !shiftOK || !shift.Enabled || !futureOrToday || notified {
+				kept = append(kept, item)
+				continue
+			}
+
 			start, end, err := makeShiftTime(date, shift, loc)
 			if err != nil {
 				return err
 			}
 			newStart := start.Format(time.RFC3339)
 			newEnd := end.Format(time.RFC3339)
-			if active.Items[i].ShiftName == shift.Name && active.Items[i].ShiftShortName == shift.ShortName && active.Items[i].StartTime == newStart && active.Items[i].EndTime == newEnd {
-				continue
+			if item.ShiftName != shift.Name || item.ShiftShortName != shift.ShortName || item.StartTime != newStart || item.EndTime != newEnd || (userOK && (item.StaffName != user.Name || item.TelegramUserID != user.TelegramUserID)) {
+				item.ShiftName = shift.Name
+				item.ShiftShortName = shift.ShortName
+				item.StartTime = newStart
+				item.EndTime = newEnd
+				if userOK {
+					item.StaffName = user.Name
+					item.TelegramUserID = user.TelegramUserID
+				}
+				changed++
 			}
-			active.Items[i].ShiftName = shift.Name
-			active.Items[i].ShiftShortName = shift.ShortName
-			active.Items[i].StartTime = newStart
-			active.Items[i].EndTime = newEnd
-			changed++
+			kept = append(kept, item)
 		}
-		if changed == 0 {
+		active.Items = NormalizeScheduleItems(kept)
+		dedupRemoved := beforeCount - removed - len(active.Items)
+		if changed == 0 && removed == 0 && dedupRemoved == 0 {
 			summary = ShiftUpdateSummary{ChangedItems: 0, NewRevision: active.Revision, VersionID: active.VersionID}
 			return nil
 		}
 		active.Revision++
 		active.VersionID = newVersionID(active.Revision)
 		active.EffectiveAt = time.Now().Format(time.RFC3339)
-		active.SourceApprovalID = "auto_shift_time_sync"
+		active.SourceApprovalID = "auto_schedule_consistency_sync"
 		if err := s.SaveActiveLocked(active); err != nil {
 			return err
 		}
 		if err := s.writeByDayAndHistoryLocked(active); err != nil {
 			return err
 		}
-		summary = ShiftUpdateSummary{ChangedItems: changed, NewRevision: active.Revision, VersionID: active.VersionID}
+		if err := s.removeEmptyFutureDateFilesLocked(active, affectedDates, loc); err != nil {
+			return err
+		}
+		summary = ShiftUpdateSummary{ChangedItems: changed + removed + dedupRemoved, NewRevision: active.Revision, VersionID: active.VersionID}
 		return nil
 	})
 	return summary, err

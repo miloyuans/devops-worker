@@ -22,7 +22,7 @@ func BuildScheduleItems(rules []ScheduleRule, users []StaffUser, shifts []Shift,
 	}
 	shiftMap := map[string]Shift{}
 	for _, sh := range shifts {
-		if sh.Enabled || sh.Code != "" {
+		if sh.Enabled && sh.Code != "" {
 			shiftMap[sh.Code] = sh
 		}
 	}
@@ -124,8 +124,38 @@ func MergeScheduleItems(existing []ScheduleItem, updates []ScheduleItem) []Sched
 		}
 	}
 	merged = append(merged, updates...)
-	sortScheduleItems(merged)
-	return merged
+	return NormalizeScheduleItems(merged)
+}
+
+// NormalizeScheduleItems enforces the core invariant of the scheduling system:
+// one staff member can have only one effective shift on a given date. When
+// duplicated items are encountered, the later item in the slice wins. This makes
+// approval merges, repair jobs, and manual data cleanups deterministic.
+func NormalizeScheduleItems(items []ScheduleItem) []ScheduleItem {
+	byKey := map[string]ScheduleItem{}
+	order := make([]string, 0, len(items))
+	seen := map[string]bool{}
+	for _, item := range items {
+		item.Date = strings.TrimSpace(item.Date)
+		item.StaffID = strings.TrimSpace(item.StaffID)
+		if item.Date == "" || item.StaffID == "" {
+			continue
+		}
+		key := item.Date + "|" + item.StaffID
+		if !seen[key] {
+			seen[key] = true
+			order = append(order, key)
+		}
+		byKey[key] = item
+	}
+	out := make([]ScheduleItem, 0, len(byKey))
+	for _, key := range order {
+		if item, ok := byKey[key]; ok {
+			out = append(out, item)
+		}
+	}
+	sortScheduleItems(out)
+	return out
 }
 
 func NormalizeDraftChanges(changes []ScheduleDraftChange) []ScheduleDraftChange {

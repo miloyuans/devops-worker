@@ -288,22 +288,41 @@ func (a *App) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	id := r.FormValue("id")
 	users, _ := a.Store.LoadUsers()
+	disabledNow := false
 	for i := range users {
 		if users[i].ID == id {
 			if !a.isAdmin(r) && users[i].CreatedBy != "user" {
 				a.renderError(w, "用户管理", "普通用户只能修改自己新建的用户，不能修改既有/admin 用户")
 				return
 			}
+			wasEnabled := users[i].Enabled
 			users[i].Name = strings.TrimSpace(r.FormValue("name"))
 			users[i].TelegramUserID = parseFormInt64(r.FormValue("telegram_user_id"))
 			users[i].Enabled = r.FormValue("enabled") == "true"
 			users[i].UpdatedAt = time.Now().Format(time.RFC3339)
+			disabledNow = wasEnabled && !users[i].Enabled
 		}
 	}
 	if err := a.Store.SaveUsers(users); err != nil {
 		log.Printf("update user error: %v", err)
 	}
+	if disabledNow {
+		a.asyncCleanupFutureSchedules(id, "", "user_disabled_cleanup")
+	}
 	http.Redirect(w, r, "/users", http.StatusSeeOther)
+}
+
+func (a *App) asyncCleanupFutureSchedules(userID string, shiftCode string, reason string) {
+	go func() {
+		summary, err := a.Store.CleanupFutureItemsByUserOrShift(userID, shiftCode, a.Loc, reason)
+		if err != nil {
+			log.Printf("async cleanup future schedules failed: user=%s shift=%s reason=%s err=%v", userID, shiftCode, reason, err)
+			return
+		}
+		if summary.ChangedItems > 0 {
+			log.Printf("async cleanup future schedules done: user=%s shift=%s reason=%s changed=%d revision=%d version=%s", userID, shiftCode, reason, summary.ChangedItems, summary.NewRevision, summary.VersionID)
+		}
+	}()
 }
 
 func (a *App) handleUserDelete(w http.ResponseWriter, r *http.Request) {
@@ -319,13 +338,31 @@ func (a *App) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.FormValue("id")
 	users, _ := a.Store.LoadUsers()
 	out := make([]StaffUser, 0, len(users))
+	changed := false
+	permanentlyDeleted := false
 	for _, u := range users {
 		if u.ID != id {
 			out = append(out, u)
+			continue
+		}
+		changed = true
+		if u.Enabled {
+			u.Enabled = false
+			u.UpdatedAt = time.Now().Format(time.RFC3339)
+			out = append(out, u)
+		} else {
+			permanentlyDeleted = true
 		}
 	}
-	if err := a.Store.SaveUsers(out); err != nil {
-		log.Printf("delete user error: %v", err)
+	if changed {
+		if err := a.Store.SaveUsers(out); err != nil {
+			log.Printf("disable/delete user error: %v", err)
+		}
+		if permanentlyDeleted {
+			a.asyncCleanupFutureSchedules(id, "", "user_delete_cleanup")
+		} else {
+			a.asyncCleanupFutureSchedules(id, "", "user_disable_cleanup")
+		}
 	}
 	http.Redirect(w, r, "/users", http.StatusSeeOther)
 }
@@ -420,7 +457,9 @@ func (a *App) handleShiftUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := a.Store.SaveShifts(shifts); err != nil {
 		log.Printf("update shift error: %v", err)
 	}
-	if summary, err := a.Store.UpdateFutureItemsForShift(updated, a.Loc); err != nil {
+	if !updated.Enabled {
+		a.asyncCleanupFutureSchedules("", updated.Code, "shift_disabled_cleanup")
+	} else if summary, err := a.Store.UpdateFutureItemsForShift(updated, a.Loc); err != nil {
 		log.Printf("update future schedule items failed: %v", err)
 	} else if summary.ChangedItems > 0 {
 		log.Printf("shift %s updated %d future schedule items, revision=%d version=%s", updated.Code, summary.ChangedItems, summary.NewRevision, summary.VersionID)
@@ -441,13 +480,30 @@ func (a *App) handleShiftDelete(w http.ResponseWriter, r *http.Request) {
 	code := r.FormValue("code")
 	shifts, _ := a.Store.LoadShifts()
 	out := make([]Shift, 0, len(shifts))
+	changed := false
+	permanentlyDeleted := false
 	for _, sh := range shifts {
 		if sh.Code != code {
 			out = append(out, sh)
+			continue
+		}
+		changed = true
+		if sh.Enabled {
+			sh.Enabled = false
+			out = append(out, sh)
+		} else {
+			permanentlyDeleted = true
 		}
 	}
-	if err := a.Store.SaveShifts(out); err != nil {
-		log.Printf("delete shift error: %v", err)
+	if changed {
+		if err := a.Store.SaveShifts(out); err != nil {
+			log.Printf("disable/delete shift error: %v", err)
+		}
+		if permanentlyDeleted {
+			a.asyncCleanupFutureSchedules("", code, "shift_delete_cleanup")
+		} else {
+			a.asyncCleanupFutureSchedules("", code, "shift_disable_cleanup")
+		}
 	}
 	http.Redirect(w, r, "/shifts", http.StatusSeeOther)
 }
@@ -457,8 +513,8 @@ func (a *App) handleSchedule(w http.ResponseWriter, r *http.Request) {
 	users, _ := a.Store.LoadUsers()
 	shifts, _ := a.Store.LoadShifts()
 	active, _ := a.Store.LoadActive()
-	data.Users = users
-	data.Shifts = shifts
+	data.Users = enabledUsers(users)
+	data.Shifts = enabledShifts(shifts)
 	data.Active = active
 	loc := a.requestLocation(r)
 	year, month, selected := a.resolveCalendarRequestWithLoc(r, data.NowYear, data.NowMonth, data.NowDate, loc)
@@ -712,6 +768,26 @@ func splitCSV(s string) []string {
 		out = append(out, v)
 	}
 	sort.Strings(out)
+	return out
+}
+
+func enabledUsers(users []StaffUser) []StaffUser {
+	out := make([]StaffUser, 0, len(users))
+	for _, u := range users {
+		if u.Enabled {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+func enabledShifts(shifts []Shift) []Shift {
+	out := make([]Shift, 0, len(shifts))
+	for _, sh := range shifts {
+		if sh.Enabled {
+			out = append(out, sh)
+		}
+	}
 	return out
 }
 
