@@ -321,6 +321,9 @@ func (a *App) asyncCleanupFutureSchedules(userID string, shiftCode string, reaso
 		}
 		if summary.ChangedItems > 0 {
 			log.Printf("async cleanup future schedules done: user=%s shift=%s reason=%s changed=%d revision=%d version=%s", userID, shiftCode, reason, summary.ChangedItems, summary.NewRevision, summary.VersionID)
+			if a.TG != nil {
+				a.TG.WakeNotificationQueue()
+			}
 		}
 	}()
 }
@@ -463,6 +466,9 @@ func (a *App) handleShiftUpdate(w http.ResponseWriter, r *http.Request) {
 		log.Printf("update future schedule items failed: %v", err)
 	} else if summary.ChangedItems > 0 {
 		log.Printf("shift %s updated %d future schedule items, revision=%d version=%s", updated.Code, summary.ChangedItems, summary.NewRevision, summary.VersionID)
+		if a.TG != nil {
+			a.TG.WakeNotificationQueue()
+		}
 	}
 	http.Redirect(w, r, "/shifts", http.StatusSeeOther)
 }

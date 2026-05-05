@@ -25,6 +25,7 @@ type TelegramService struct {
 	BaseURL    string
 	BotName    string
 	BotID      int64
+	QueueWake  chan struct{}
 }
 
 type telegramAPIResponse[T any] struct {
@@ -381,6 +382,9 @@ func (t *TelegramService) handleCallback(cq *telegramCallbackQuery) {
 		}
 		t.answerCallback(cq.ID, "已同意，排班已生效", true)
 		t.editApprovalMessages(approval)
+		// Approval changes the active schedule, so refresh notification tasks
+		// immediately instead of waiting for the next 300 second queue cycle.
+		t.WakeNotificationQueue()
 		t.replyToCallbackMessage(cq, fmt.Sprintf("✅ 审批已通过并生效\n审批ID: %s\n审批人: %s", approval.ID, t.telegramDisplayName(reviewerID)))
 	case "reject":
 		approval, err := t.Store.Reject(approvalID, reviewerID, "telegram callback rejected")
@@ -527,67 +531,168 @@ func (t *TelegramService) handleText(msg *telegramMessage) {
 }
 
 func (t *TelegramService) startScheduler() {
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
-	for range ticker.C {
-		t.checkAndNotify()
+	// Notification reminders are task-queue based.  The scheduler consumes due
+	// tasks every 300 seconds while today's queue still has pending work.  Once
+	// all tasks for the current local day are sent/cancelled, it sleeps until the
+	// next day to avoid repeated full scans.  Schedule/shift/user changes call
+	// WakeNotificationQueue, so a same-day update can wake the scheduler early and
+	// create/consume newly added tasks.
+	if t.QueueWake == nil {
+		t.QueueWake = make(chan struct{}, 1)
+	}
+
+	for {
+		t.processNotificationQueue()
+
+		complete, total, open, err := t.Store.TodayNotificationTasksComplete(t.Loc)
+		wait := 300 * time.Second
+		if err != nil {
+			log.Printf("check today notification queue completion failed: %v", err)
+		} else if complete {
+			wait = durationUntilNextLocalDay(t.Loc)
+			log.Printf("today notification queue complete: total=%d open=%d, sleeping until next local day or queue wake", total, open)
+		}
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-t.QueueWake:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}
 	}
 }
 
-func (t *TelegramService) checkAndNotify() {
-	active, err := t.Store.LoadActive()
-	if err != nil {
-		log.Printf("load active for reminder failed: %v", err)
+func (t *TelegramService) WakeNotificationQueue() {
+	if t == nil || t.QueueWake == nil {
 		return
 	}
-	target := time.Now().In(t.Loc).Add(30 * time.Minute).Format("2006-01-02 15:04")
-	for _, item := range active.Items {
-		if !shiftNeedsNotification(item) {
+	select {
+	case t.QueueWake <- struct{}{}:
+	default:
+	}
+}
+
+func durationUntilNextLocalDay(loc *time.Location) time.Duration {
+	if loc == nil {
+		loc = time.Local
+	}
+	now := time.Now().In(loc)
+	next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 5, 0, loc)
+	return time.Until(next)
+}
+
+func (t *TelegramService) processNotificationQueue() {
+	if t == nil || t.Store == nil {
+		return
+	}
+	active, err := t.Store.LoadActive()
+	if err != nil {
+		log.Printf("load active for notification queue failed: %v", err)
+		return
+	}
+	created, cancelled, refreshed, err := t.Store.SyncNotificationTasks(active, t.Cfg.GroupChatIDs, t.Loc)
+	if err != nil {
+		log.Printf("sync notification tasks failed: %v", err)
+		return
+	}
+	if created > 0 || cancelled > 0 || refreshed > 0 {
+		log.Printf("notification queue synced: created=%d refreshed=%d cancelled=%d", created, refreshed, cancelled)
+	}
+
+	now := time.Now().In(t.Loc)
+	tasks, err := t.Store.ClaimDueNotificationTasks(now, 100)
+	if err != nil {
+		log.Printf("claim due notification tasks failed: %v", err)
+		return
+	}
+	if len(tasks) == 0 {
+		return
+	}
+	log.Printf("notification queue consuming %d due tasks", len(tasks))
+	for _, task := range tasks {
+		if t.Store.NotificationAlreadySent(task.Key) {
+			record := t.notificationRecordFromTask(task)
+			if record.SentAt == "" {
+				record.SentAt = time.Now().Format(time.RFC3339)
+			}
+			if err := t.Store.CompleteNotificationTaskSent(task.ID, record); err != nil {
+				log.Printf("mark duplicate notification task sent failed task=%s: %v", task.ID, err)
+			}
 			continue
 		}
-		start, err := time.Parse(time.RFC3339, item.StartTime)
-		if err != nil || start.In(t.Loc).Format("2006-01-02 15:04") != target {
+		if err := t.sendReminderTask(task); err != nil {
+			log.Printf("send notification task failed task=%s staff=%s shift=%s attempt=%d err=%v", task.ID, task.Item.StaffName, task.Item.ShiftName, task.Attempts, err)
+			_ = t.Store.FailNotificationTask(task.ID, err, time.Now().Add(300*time.Second))
 			continue
 		}
-		for _, chatID := range t.Cfg.GroupChatIDs {
-			key := notificationKey(item, chatID)
-			if t.Store.NotificationAlreadySent(key) {
-				continue
-			}
-			record := NotificationRecord{
-				ID:             hashID("ntf", key),
-				Key:            key,
-				ItemKey:        notificationItemKey(item),
-				Date:           item.Date,
-				StaffID:        item.StaffID,
-				StaffName:      item.StaffName,
-				ShiftCode:      item.ShiftCode,
-				ShiftName:      item.ShiftName,
-				TelegramUserID: item.TelegramUserID,
-				ChatID:         chatID,
-				SentAt:         time.Now().Format(time.RFC3339),
-			}
-			mention := html.EscapeString(item.StaffName)
-			if item.TelegramUserID > 0 {
-				mention = fmt.Sprintf("<a href=\"tg://user?id=%d\">%s</a>", item.TelegramUserID, html.EscapeString(item.StaffName))
-			}
-			body := fmt.Sprintf("⏰ <b>上班提醒</b>\n\n员工: %s\n班次: %s\n时间: %s", mention, html.EscapeString(item.ShiftName), html.EscapeString(formatClock(item.StartTime)))
-			footer := "还有 30 分钟开始值班，请注意交接。"
-			if strings.TrimSpace(t.Cfg.WorkOrderURL) != "" {
-				body += fmt.Sprintf("\n\n排班工单: %s", html.EscapeString(strings.TrimSpace(t.Cfg.WorkOrderURL)))
-				footer = "还有 30 分钟开始值班，请注意交接, 如需查阅变更请使用工单。"
-			}
-			body += "\n\n" + footer
-			replyMarkup := map[string]any{"inline_keyboard": [][]map[string]string{{{"text": "我已读", "callback_data": "read:" + record.ID}}}}
-			if err := t.sendMessageWithMarkup(chatID, t.getThreadID(chatID, 0), body, "HTML", replyMarkup); err != nil {
-				log.Printf("send reminder failed: %v", err)
-				continue
-			}
-			if _, err := t.Store.RecordNotificationSent(record); err != nil {
-				log.Printf("record notification failed: %v", err)
-			}
+		record := t.notificationRecordFromTask(task)
+		record.SentAt = time.Now().Format(time.RFC3339)
+		if err := t.Store.CompleteNotificationTaskSent(task.ID, record); err != nil {
+			log.Printf("complete notification task failed task=%s: %v", task.ID, err)
+			_ = t.Store.FailNotificationTask(task.ID, err, time.Now().Add(300*time.Second))
 		}
 	}
+}
+
+func (t *TelegramService) notificationRecordFromTask(task NotificationTask) NotificationRecord {
+	item := task.Item
+	return NotificationRecord{
+		ID:             hashID("ntf", task.Key),
+		Key:            task.Key,
+		ItemKey:        notificationItemKey(item),
+		Date:           item.Date,
+		StaffID:        item.StaffID,
+		StaffName:      item.StaffName,
+		ShiftCode:      item.ShiftCode,
+		ShiftName:      item.ShiftName,
+		TelegramUserID: item.TelegramUserID,
+		ChatID:         task.ChatID,
+	}
+}
+
+func (t *TelegramService) sendReminderTask(task NotificationTask) error {
+	item := task.Item
+	if !shiftNeedsNotification(item) {
+		return fmt.Errorf("班次无需通知: %s", item.ShiftCode)
+	}
+	mention := html.EscapeString(item.StaffName)
+	if item.TelegramUserID > 0 {
+		mention = fmt.Sprintf("<a href=\"tg://user?id=%d\">%s</a>", item.TelegramUserID, html.EscapeString(item.StaffName))
+	}
+	body := fmt.Sprintf("⏰ <b>上班提醒</b>\n\n员工: %s\n班次: %s\n时间: %s", mention, html.EscapeString(item.ShiftName), html.EscapeString(formatClock(item.StartTime)))
+	if strings.TrimSpace(t.Cfg.WorkOrderURL) != "" {
+		body += fmt.Sprintf("\n\n排班工单: %s", html.EscapeString(strings.TrimSpace(t.Cfg.WorkOrderURL)))
+	}
+	footer := t.reminderFooter(item)
+	body += "\n\n" + footer
+	recordID := hashID("ntf", task.Key)
+	replyMarkup := map[string]any{"inline_keyboard": [][]map[string]string{{{"text": "我已读", "callback_data": "read:" + recordID}}}}
+	return t.sendMessageWithMarkup(task.ChatID, t.getThreadID(task.ChatID, 0), body, "HTML", replyMarkup)
+}
+
+func (t *TelegramService) reminderFooter(item ScheduleItem) string {
+	base := "请注意交接。"
+	if strings.TrimSpace(t.Cfg.WorkOrderURL) != "" {
+		base = "请注意交接, 如需查阅变更请使用工单。"
+	}
+	start, err := time.Parse(time.RFC3339, item.StartTime)
+	if err != nil {
+		return "还有 30 分钟开始值班，" + base
+	}
+	remaining := start.In(t.Loc).Sub(time.Now().In(t.Loc))
+	if remaining <= 0 {
+		return "班次已到开始时间，" + base
+	}
+	minutesLeft := int(remaining.Minutes())
+	if minutesLeft < 1 {
+		minutesLeft = 1
+	}
+	return fmt.Sprintf("还有 %d 分钟开始值班，%s", minutesLeft, base)
 }
 
 func (t *TelegramService) getThreadID(chatID int64, msgThreadID int) int {

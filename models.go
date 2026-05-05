@@ -137,6 +137,28 @@ type NotificationState struct {
 	Records []NotificationRecord `json:"records"`
 }
 
+type NotificationTask struct {
+	ID            string       `json:"id"`
+	Key           string       `json:"key"`
+	ScheduleKey   string       `json:"schedule_key"` // stable date+staff+chat key used to refresh pending tasks after schedule/shift changes
+	ItemKey       string       `json:"item_key"`
+	Status        string       `json:"status"` // pending/sending/retry/sent/cancelled
+	ChatID        int64        `json:"chat_id"`
+	RunAt         string       `json:"run_at"`
+	NextAttemptAt string       `json:"next_attempt_at"`
+	Attempts      int          `json:"attempts"`
+	LastAttemptAt string       `json:"last_attempt_at,omitempty"`
+	LastError     string       `json:"last_error,omitempty"`
+	SentAt        string       `json:"sent_at,omitempty"`
+	CreatedAt     string       `json:"created_at"`
+	UpdatedAt     string       `json:"updated_at"`
+	Item          ScheduleItem `json:"item"`
+}
+
+type NotificationTaskState struct {
+	Tasks []NotificationTask `json:"tasks"`
+}
+
 type ReminderState struct {
 	Sent map[string]bool `json:"sent"`
 }

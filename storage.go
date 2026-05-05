@@ -46,6 +46,9 @@ func (s *Storage) Init() error {
 	if err := s.ensureDefaultNotificationState(); err != nil {
 		return err
 	}
+	if err := s.ensureDefaultNotificationTaskState(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -153,6 +156,14 @@ func (s *Storage) ensureDefaultNotificationState() error {
 		return nil
 	}
 	return writeJSONAtomic(path, NotificationState{Records: []NotificationRecord{}})
+}
+
+func (s *Storage) ensureDefaultNotificationTaskState() error {
+	path := filepath.Join(s.Dir, "meta", "notification_tasks.json")
+	if fileExists(path) {
+		return nil
+	}
+	return writeJSONAtomic(path, NotificationTaskState{Tasks: []NotificationTask{}})
 }
 
 func (s *Storage) WithLock(fn func() error) error {
@@ -577,6 +588,317 @@ func (s *Storage) RecordNotificationSent(record NotificationRecord) (bool, error
 		return writeJSONAtomic(path, state)
 	})
 	return created, err
+}
+
+func (s *Storage) LoadNotificationTasks() (NotificationTaskState, error) {
+	var state NotificationTaskState
+	path := filepath.Join(s.Dir, "meta", "notification_tasks.json")
+	if err := readJSON(path, &state); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return NotificationTaskState{Tasks: []NotificationTask{}}, nil
+		}
+		return state, err
+	}
+	if state.Tasks == nil {
+		state.Tasks = []NotificationTask{}
+	}
+	return state, nil
+}
+
+func (s *Storage) SyncNotificationTasks(active ActiveSchedule, chatIDs []int64, loc *time.Location) (created int, cancelled int, refreshed int, err error) {
+	if loc == nil {
+		loc = time.Local
+	}
+	err = s.WithLock(func() error {
+		tasksPath := filepath.Join(s.Dir, "meta", "notification_tasks.json")
+		state := NotificationTaskState{Tasks: []NotificationTask{}}
+		_ = readJSON(tasksPath, &state)
+		if state.Tasks == nil {
+			state.Tasks = []NotificationTask{}
+		}
+
+		notifications := NotificationState{Records: []NotificationRecord{}}
+		_ = readJSON(filepath.Join(s.Dir, "meta", "notifications.json"), &notifications)
+		sentByKey := map[string]bool{}
+		for _, rec := range notifications.Records {
+			sentByKey[rec.Key] = true
+		}
+
+		now := time.Now().In(loc)
+		nowStr := time.Now().Format(time.RFC3339)
+
+		// schedule_key is stable per date+staff+chat, so pending tasks can be
+		// refreshed when shift_code/start_time changes instead of leaving stale
+		// pending tasks behind.  Legacy tasks without schedule_key are mapped from
+		// their embedded item for backward compatibility.
+		byScheduleKey := map[string]int{}
+		for i := range state.Tasks {
+			if strings.TrimSpace(state.Tasks[i].ScheduleKey) == "" {
+				state.Tasks[i].ScheduleKey = notificationScheduleKey(state.Tasks[i].Item, state.Tasks[i].ChatID)
+			}
+			if state.Tasks[i].Status == "sent" || state.Tasks[i].Status == "cancelled" {
+				continue
+			}
+			if state.Tasks[i].ScheduleKey != "" {
+				byScheduleKey[state.Tasks[i].ScheduleKey] = i
+			}
+		}
+
+		activeScheduleKeys := map[string]bool{}
+		for _, item := range NormalizeScheduleItems(active.Items) {
+			if !shiftNeedsNotification(item) {
+				continue
+			}
+			start, parseErr := time.Parse(time.RFC3339, item.StartTime)
+			if parseErr != nil {
+				continue
+			}
+			for _, chatID := range chatIDs {
+				if chatID == 0 {
+					continue
+				}
+				scheduleKey := notificationScheduleKey(item, chatID)
+				key := notificationKey(item, chatID)
+				activeScheduleKeys[scheduleKey] = true
+				runAt := start.In(loc).Add(-30 * time.Minute)
+				runAtStr := runAt.Format(time.RFC3339)
+
+				if idx, ok := byScheduleKey[scheduleKey]; ok {
+					if sentByKey[key] {
+						state.Tasks[idx].Status = "sent"
+						if state.Tasks[idx].SentAt == "" {
+							state.Tasks[idx].SentAt = nowStr
+						}
+						state.Tasks[idx].UpdatedAt = nowStr
+						continue
+					}
+					if state.Tasks[idx].Status == "sent" || state.Tasks[idx].Status == "cancelled" {
+						continue
+					}
+
+					oldKey := state.Tasks[idx].Key
+					oldRunAt := state.Tasks[idx].RunAt
+					oldItemKey := state.Tasks[idx].ItemKey
+					state.Tasks[idx].Key = key
+					state.Tasks[idx].ScheduleKey = scheduleKey
+					state.Tasks[idx].ItemKey = notificationItemKey(item)
+					state.Tasks[idx].Item = item
+					state.Tasks[idx].RunAt = runAtStr
+					// Always align retry eligibility with the latest run_at. If the new
+					// run_at is already in the past but the shift has not started yet, the
+					// task is consumed immediately in this same queue cycle.
+					state.Tasks[idx].NextAttemptAt = runAtStr
+					state.Tasks[idx].UpdatedAt = nowStr
+					if oldKey != key || oldRunAt != runAtStr || oldItemKey != state.Tasks[idx].ItemKey {
+						refreshed++
+						if state.Tasks[idx].Status == "sending" {
+							state.Tasks[idx].Status = "retry"
+						}
+					}
+					continue
+				}
+
+				// Do not create brand-new tasks for shifts that already started.  If
+				// run_at is in the past but the shift is still in the future, create the
+				// task anyway so it can be consumed immediately.
+				if !start.In(loc).After(now) {
+					continue
+				}
+				createdAt := nowStr
+				task := NotificationTask{
+					ID:            hashID("tsk", scheduleKey),
+					Key:           key,
+					ScheduleKey:   scheduleKey,
+					ItemKey:       notificationItemKey(item),
+					Status:        "pending",
+					ChatID:        chatID,
+					RunAt:         runAtStr,
+					NextAttemptAt: runAtStr,
+					CreatedAt:     createdAt,
+					UpdatedAt:     createdAt,
+					Item:          item,
+				}
+				state.Tasks = append(state.Tasks, task)
+				byScheduleKey[scheduleKey] = len(state.Tasks) - 1
+				created++
+			}
+		}
+
+		for i := range state.Tasks {
+			if state.Tasks[i].Status == "sent" || state.Tasks[i].Status == "cancelled" {
+				continue
+			}
+			if strings.TrimSpace(state.Tasks[i].ScheduleKey) == "" {
+				state.Tasks[i].ScheduleKey = notificationScheduleKey(state.Tasks[i].Item, state.Tasks[i].ChatID)
+			}
+			if !activeScheduleKeys[state.Tasks[i].ScheduleKey] {
+				state.Tasks[i].Status = "cancelled"
+				state.Tasks[i].UpdatedAt = nowStr
+				cancelled++
+			}
+		}
+		return writeJSONAtomic(tasksPath, state)
+	})
+	return created, cancelled, refreshed, err
+}
+
+func (s *Storage) TodayNotificationTasksComplete(loc *time.Location) (complete bool, total int, open int, err error) {
+	if loc == nil {
+		loc = time.Local
+	}
+	today := time.Now().In(loc).Format("2006-01-02")
+	err = s.WithLock(func() error {
+		path := filepath.Join(s.Dir, "meta", "notification_tasks.json")
+		state := NotificationTaskState{Tasks: []NotificationTask{}}
+		_ = readJSON(path, &state)
+		if state.Tasks == nil {
+			state.Tasks = []NotificationTask{}
+		}
+		for _, task := range state.Tasks {
+			if task.Item.Date != today {
+				continue
+			}
+			total++
+			switch task.Status {
+			case "sent", "cancelled":
+				continue
+			default:
+				open++
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return false, total, open, err
+	}
+	return open == 0, total, open, nil
+}
+
+func (s *Storage) ClaimDueNotificationTasks(now time.Time, limit int) ([]NotificationTask, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	claimed := []NotificationTask{}
+	err := s.WithLock(func() error {
+		path := filepath.Join(s.Dir, "meta", "notification_tasks.json")
+		state := NotificationTaskState{Tasks: []NotificationTask{}}
+		_ = readJSON(path, &state)
+		if state.Tasks == nil {
+			state.Tasks = []NotificationTask{}
+		}
+		staleSendingBefore := now.Add(-10 * time.Minute)
+		for i := range state.Tasks {
+			if len(claimed) >= limit {
+				break
+			}
+			task := state.Tasks[i]
+			eligibleStatus := task.Status == "pending" || task.Status == "retry"
+			if task.Status == "sending" {
+				last, err := time.Parse(time.RFC3339, task.LastAttemptAt)
+				eligibleStatus = err != nil || last.Before(staleSendingBefore)
+			}
+			if !eligibleStatus {
+				continue
+			}
+			runAt, err := time.Parse(time.RFC3339, task.RunAt)
+			if err != nil || runAt.After(now) {
+				continue
+			}
+			nextAttempt, err := time.Parse(time.RFC3339, task.NextAttemptAt)
+			if err == nil && nextAttempt.After(now) {
+				continue
+			}
+			state.Tasks[i].Status = "sending"
+			state.Tasks[i].Attempts++
+			state.Tasks[i].LastAttemptAt = now.Format(time.RFC3339)
+			state.Tasks[i].UpdatedAt = now.Format(time.RFC3339)
+			claimed = append(claimed, state.Tasks[i])
+		}
+		return writeJSONAtomic(path, state)
+	})
+	return claimed, err
+}
+
+func (s *Storage) CompleteNotificationTaskSent(taskID string, record NotificationRecord) error {
+	return s.WithLock(func() error {
+		tasksPath := filepath.Join(s.Dir, "meta", "notification_tasks.json")
+		state := NotificationTaskState{Tasks: []NotificationTask{}}
+		_ = readJSON(tasksPath, &state)
+		if state.Tasks == nil {
+			state.Tasks = []NotificationTask{}
+		}
+		now := time.Now().Format(time.RFC3339)
+		found := false
+		for i := range state.Tasks {
+			if state.Tasks[i].ID != taskID {
+				continue
+			}
+			found = true
+			break
+		}
+		if !found {
+			return fmt.Errorf("通知任务不存在: %s", taskID)
+		}
+
+		if record.SentAt == "" {
+			record.SentAt = now
+		}
+		notificationsPath := filepath.Join(s.Dir, "meta", "notifications.json")
+		notifications := NotificationState{Records: []NotificationRecord{}}
+		_ = readJSON(notificationsPath, &notifications)
+		exists := false
+		for _, rec := range notifications.Records {
+			if rec.Key == record.Key {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			notifications.Records = append(notifications.Records, record)
+			if err := writeJSONAtomic(notificationsPath, notifications); err != nil {
+				return err
+			}
+		}
+
+		for i := range state.Tasks {
+			if state.Tasks[i].ID != taskID {
+				continue
+			}
+			state.Tasks[i].Status = "sent"
+			state.Tasks[i].SentAt = record.SentAt
+			state.Tasks[i].LastError = ""
+			state.Tasks[i].UpdatedAt = now
+			break
+		}
+		return writeJSONAtomic(tasksPath, state)
+	})
+}
+
+func (s *Storage) FailNotificationTask(taskID string, taskErr error, nextAttempt time.Time) error {
+	return s.WithLock(func() error {
+		path := filepath.Join(s.Dir, "meta", "notification_tasks.json")
+		state := NotificationTaskState{Tasks: []NotificationTask{}}
+		_ = readJSON(path, &state)
+		if state.Tasks == nil {
+			state.Tasks = []NotificationTask{}
+		}
+		for i := range state.Tasks {
+			if state.Tasks[i].ID != taskID {
+				continue
+			}
+			if state.Tasks[i].Status == "sent" || state.Tasks[i].Status == "cancelled" {
+				return nil
+			}
+			state.Tasks[i].Status = "retry"
+			state.Tasks[i].NextAttemptAt = nextAttempt.Format(time.RFC3339)
+			if taskErr != nil {
+				state.Tasks[i].LastError = taskErr.Error()
+			}
+			state.Tasks[i].UpdatedAt = time.Now().Format(time.RFC3339)
+			return writeJSONAtomic(path, state)
+		}
+		return fmt.Errorf("通知任务不存在: %s", taskID)
+	})
 }
 
 func (s *Storage) MarkNotificationRead(recordID string, readerID int64) (*NotificationRecord, bool, error) {

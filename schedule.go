@@ -453,6 +453,13 @@ func notificationItemKey(item ScheduleItem) string {
 	return item.Date + "|" + item.StaffID + "|" + item.ShiftCode + "|" + item.StartTime
 }
 
+// notificationScheduleKey is stable for one user's duty on one day in one chat.
+// It is intentionally independent of shift_code/start_time so pending tasks can
+// be refreshed in-place when schedule or shift time changes.
+func notificationScheduleKey(item ScheduleItem, chatID int64) string {
+	return fmt.Sprintf("%s|%s|%d", item.Date, item.StaffID, chatID)
+}
+
 func notificationKey(item ScheduleItem, chatID int64) string {
 	return fmt.Sprintf("%s|%d", notificationItemKey(item), chatID)
 }

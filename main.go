@@ -34,7 +34,7 @@ func main() {
 	}
 
 	app := &App{Cfg: cfg, Store: store, Loc: loc, TG: tg}
-	go startScheduleConsistencyScheduler(store, loc)
+	go startScheduleConsistencyScheduler(store, loc, tg)
 	if tg != nil {
 		tg.StartPollingAndScheduler()
 	}
@@ -45,7 +45,7 @@ func main() {
 	}
 }
 
-func startScheduleConsistencyScheduler(store *Storage, loc *time.Location) {
+func startScheduleConsistencyScheduler(store *Storage, loc *time.Location, tg *TelegramService) {
 	if store == nil {
 		return
 	}
@@ -57,6 +57,9 @@ func startScheduleConsistencyScheduler(store *Storage, loc *time.Location) {
 		}
 		if summary.ChangedItems > 0 {
 			log.Printf("schedule consistency sync updated %d active items, revision=%d version=%s", summary.ChangedItems, summary.NewRevision, summary.VersionID)
+			if tg != nil {
+				tg.WakeNotificationQueue()
+			}
 		}
 	}
 	run()
