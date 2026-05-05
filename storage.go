@@ -631,15 +631,25 @@ func (s *Storage) SyncNotificationTasks(active ActiveSchedule, chatIDs []int64, 
 		// refreshed when shift_code/start_time changes instead of leaving stale
 		// pending tasks behind.  Legacy tasks without schedule_key are mapped from
 		// their embedded item for backward compatibility.
+		//
+		// Keep sent tasks in a separate index.  A queue refresh must never create a
+		// new pending task for a schedule that has already been sent; otherwise an
+		// unchanged schedule could be notified again after SyncNotificationTasks runs.
 		byScheduleKey := map[string]int{}
+		sentTaskByScheduleKey := map[string]int{}
 		for i := range state.Tasks {
 			if strings.TrimSpace(state.Tasks[i].ScheduleKey) == "" {
 				state.Tasks[i].ScheduleKey = notificationScheduleKey(state.Tasks[i].Item, state.Tasks[i].ChatID)
 			}
-			if state.Tasks[i].Status == "sent" || state.Tasks[i].Status == "cancelled" {
+			if state.Tasks[i].ScheduleKey == "" {
 				continue
 			}
-			if state.Tasks[i].ScheduleKey != "" {
+			switch state.Tasks[i].Status {
+			case "sent":
+				sentTaskByScheduleKey[state.Tasks[i].ScheduleKey] = i
+			case "cancelled":
+				continue
+			default:
 				byScheduleKey[state.Tasks[i].ScheduleKey] = i
 			}
 		}
@@ -665,7 +675,13 @@ func (s *Storage) SyncNotificationTasks(active ActiveSchedule, chatIDs []int64, 
 
 				if idx, ok := byScheduleKey[scheduleKey]; ok {
 					if sentByKey[key] {
+						// This exact notification was already recorded as sent.  Mark the
+						// still-open task complete instead of trying to send it again.
 						state.Tasks[idx].Status = "sent"
+						state.Tasks[idx].Key = key
+						state.Tasks[idx].ScheduleKey = scheduleKey
+						state.Tasks[idx].ItemKey = notificationItemKey(item)
+						state.Tasks[idx].Item = item
 						if state.Tasks[idx].SentAt == "" {
 							state.Tasks[idx].SentAt = nowStr
 						}
@@ -695,6 +711,18 @@ func (s *Storage) SyncNotificationTasks(active ActiveSchedule, chatIDs []int64, 
 							state.Tasks[idx].Status = "retry"
 						}
 					}
+					continue
+				}
+
+				// If this exact notification was already sent, or if this date+staff+chat
+				// schedule has already been notified once, do not create a new pending
+				// task during queue refresh.  Shift-change notifications should be a
+				// separate business flow; the regular 30-minute reminder is one-shot.
+				if sentByKey[key] {
+					continue
+				}
+				if sentIdx, ok := sentTaskByScheduleKey[scheduleKey]; ok {
+					state.Tasks[sentIdx].UpdatedAt = nowStr
 					continue
 				}
 
