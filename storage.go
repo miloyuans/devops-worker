@@ -51,13 +51,13 @@ func (s *Storage) Init() error {
 
 func defaultShifts() []Shift {
 	return []Shift{
-		{Code: "morning", Name: "早班", ShortName: "早", Start: "09:00", End: "18:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true},
-		{Code: "middle", Name: "中班", ShortName: "中", Start: "15:00", End: "24:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("15:00", "24:00"), Enabled: true},
-		{Code: "night", Name: "晚班", ShortName: "晚", Start: "00:00", End: "09:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "09:00"), Enabled: true},
-		{Code: "normal", Name: "正常班", ShortName: "正常", Start: "09:00", End: "18:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true},
-		{Code: "rest", Name: "休息", ShortName: "休", Start: "00:00", End: "23:59", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "23:59"), Enabled: true},
-		{Code: "annual_leave", Name: "年假", ShortName: "年", Start: "00:00", End: "23:59", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "23:59"), Enabled: true},
-		{Code: "sick_leave", Name: "病假", ShortName: "病", Start: "00:00", End: "23:59", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "23:59"), Enabled: true},
+		{Code: "morning", Name: "早班", ShortName: "早", Start: "09:00", End: "18:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true, CreatedBy: "system"},
+		{Code: "middle", Name: "中班", ShortName: "中", Start: "15:00", End: "24:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("15:00", "24:00"), Enabled: true, CreatedBy: "system"},
+		{Code: "night", Name: "晚班", ShortName: "晚", Start: "00:00", End: "09:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "09:00"), Enabled: true, CreatedBy: "system"},
+		{Code: "normal", Name: "正常班", ShortName: "正常", Start: "09:00", End: "18:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true, CreatedBy: "system"},
+		{Code: "rest", Name: "休息", ShortName: "休", Start: "00:00", End: "23:59", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "23:59"), Enabled: true, CreatedBy: "system"},
+		{Code: "annual_leave", Name: "年假", ShortName: "年", Start: "00:00", End: "23:59", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "23:59"), Enabled: true, CreatedBy: "system"},
+		{Code: "sick_leave", Name: "病假", ShortName: "病", Start: "00:00", End: "23:59", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "23:59"), Enabled: true, CreatedBy: "system"},
 	}
 }
 
@@ -73,6 +73,10 @@ func (s *Storage) ensureDefaultShifts() error {
 		seen := map[string]bool{}
 		for i := range shifts {
 			seen[shifts[i].Code] = true
+			if shifts[i].CreatedBy == "" {
+				shifts[i].CreatedBy = "system"
+				changed = true
+			}
 			if shifts[i].Timezone == "" {
 				shifts[i].Timezone = DefaultShiftTimezone
 				changed = true
@@ -100,6 +104,20 @@ func (s *Storage) ensureDefaultShifts() error {
 func (s *Storage) ensureDefaultUsers() error {
 	path := filepath.Join(s.Dir, "users", "users.json")
 	if fileExists(path) {
+		var db UserDB
+		if err := readJSON(path, &db); err != nil {
+			return err
+		}
+		changed := false
+		for i := range db.Users {
+			if db.Users[i].CreatedBy == "" {
+				db.Users[i].CreatedBy = "admin"
+				changed = true
+			}
+		}
+		if changed {
+			return writeJSONAtomic(path, db)
+		}
 		return nil
 	}
 	return writeJSONAtomic(path, UserDB{Users: []StaffUser{}})
@@ -560,8 +578,9 @@ func (s *Storage) RecordNotificationSent(record NotificationRecord) (bool, error
 	return created, err
 }
 
-func (s *Storage) MarkNotificationRead(recordID string, readerID int64) (*NotificationRecord, error) {
+func (s *Storage) MarkNotificationRead(recordID string, readerID int64) (*NotificationRecord, bool, error) {
 	var updated *NotificationRecord
+	firstRead := false
 	err := s.WithLock(func() error {
 		path := filepath.Join(s.Dir, "meta", "notifications.json")
 		state := NotificationState{Records: []NotificationRecord{}}
@@ -576,13 +595,14 @@ func (s *Storage) MarkNotificationRead(recordID string, readerID int64) (*Notifi
 			if state.Records[i].ReadAt == "" {
 				state.Records[i].ReadAt = time.Now().Format(time.RFC3339)
 				state.Records[i].ReadBy = readerID
+				firstRead = true
 			}
 			updated = &state.Records[i]
 			return writeJSONAtomic(path, state)
 		}
 		return fmt.Errorf("通知记录不存在或已过期")
 	})
-	return updated, err
+	return updated, firstRead, err
 }
 
 func (s *Storage) BuildScheduleItemStatuses(items []ScheduleItem, locs ...*time.Location) []ScheduleItemStatus {
@@ -598,16 +618,24 @@ func (s *Storage) BuildScheduleItemStatuses(items []ScheduleItem, locs ...*time.
 	out := make([]ScheduleItemStatus, 0, len(items))
 	for _, item := range items {
 		status := ScheduleItemStatus{ScheduleItem: item, StartClock: clockInLocation(item.StartTime, loc), EndClock: clockInLocation(item.EndTime, loc), NotifyStatus: "off", NotifyStatusLabel: "未通知", ReadStatus: "off", ReadStatusLabel: "未读"}
-		recs := byItem[notificationItemKey(item)]
-		if len(recs) > 0 {
-			status.NotifyStatus = "ok"
-			status.NotifyStatusLabel = "已通知"
+		if !shiftNeedsNotification(item) {
+			status.NotifyStatus = "muted"
+			status.NotifyStatusLabel = "无需通知"
+			status.ReadStatus = "muted"
+			status.ReadStatusLabel = "无需确认"
 		}
-		for _, rec := range recs {
-			if rec.ReadAt != "" {
-				status.ReadStatus = "ok"
-				status.ReadStatusLabel = "已读"
-				break
+		recs := byItem[notificationItemKey(item)]
+		if shiftNeedsNotification(item) {
+			if len(recs) > 0 {
+				status.NotifyStatus = "ok"
+				status.NotifyStatusLabel = "已通知"
+			}
+			for _, rec := range recs {
+				if rec.ReadAt != "" {
+					status.ReadStatus = "ok"
+					status.ReadStatusLabel = "已读"
+					break
+				}
 			}
 		}
 		out = append(out, status)

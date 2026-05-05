@@ -21,6 +21,7 @@ type Shift struct {
 	Timezone  string `json:"timezone"`
 	CrossDay  bool   `json:"cross_day"`
 	Enabled   bool   `json:"enabled"`
+	CreatedBy string `json:"created_by,omitempty"` // system/admin/user，用于 Web 权限隔离
 }
 
 type ShiftConfig struct {
@@ -32,6 +33,7 @@ type StaffUser struct {
 	Name           string `json:"name"`
 	TelegramUserID int64  `json:"telegram_user_id"`
 	Enabled        bool   `json:"enabled"`
+	CreatedBy      string `json:"created_by,omitempty"` // admin/user，用于 Web 权限隔离
 	CreatedAt      string `json:"created_at"`
 	UpdatedAt      string `json:"updated_at"`
 }
@@ -163,6 +165,8 @@ type ShiftUpdateSummary struct {
 
 type PageData struct {
 	Title             string
+	Role              string
+	IsAdmin           bool
 	Config            Config
 	Active            ActiveSchedule
 	Users             []StaffUser

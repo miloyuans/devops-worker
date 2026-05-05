@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -20,6 +24,11 @@ type App struct {
 	TG    *TelegramService
 }
 
+type contextKey string
+
+const roleContextKey contextKey = "role"
+const adminCookieName = "devops_worker_admin"
+
 func (a *App) routes() http.Handler {
 	appMux := http.NewServeMux()
 	appMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -28,6 +37,8 @@ func (a *App) routes() http.Handler {
 	appMux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
+	appMux.HandleFunc("/login", a.handleLogin)
+	appMux.HandleFunc("/logout", a.handleLogout)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleDashboard)
@@ -44,20 +55,83 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/approvals", a.handleApprovals)
 	mux.HandleFunc("/history", a.handleHistory)
 	mux.Handle("/previews/", http.StripPrefix("/previews/", http.FileServer(http.Dir(filepath.Join(a.Cfg.DataDir, "previews")))))
-	appMux.Handle("/", a.basicAuth(mux))
+	appMux.Handle("/", a.roleMiddleware(mux))
 	return appMux
 }
 
-func (a *App) basicAuth(next http.Handler) http.Handler {
+func (a *App) roleMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, pass, ok := r.BasicAuth()
-		if !ok || user != a.Cfg.AdminUsername || pass != a.Cfg.AdminPassword {
-			w.Header().Set("WWW-Authenticate", `Basic realm="devops-worker"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		role := "user"
+		if a.isAdmin(r) {
+			role = "admin"
+		}
+		ctx := context.WithValue(r.Context(), roleContextKey, role)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (a *App) role(r *http.Request) string {
+	if v, ok := r.Context().Value(roleContextKey).(string); ok && v != "" {
+		return v
+	}
+	if a.isAdmin(r) {
+		return "admin"
+	}
+	return "user"
+}
+
+func (a *App) isAdmin(r *http.Request) bool {
+	if user, pass, ok := r.BasicAuth(); ok && user == a.Cfg.AdminUsername && pass == a.Cfg.AdminPassword {
+		return true
+	}
+	c, err := r.Cookie(adminCookieName)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	return a.verifyAdminSession(c.Value)
+}
+
+func (a *App) signAdminSession(exp int64) string {
+	msg := fmt.Sprintf("%s:%d", a.Cfg.AdminUsername, exp)
+	mac := hmac.New(sha256.New, []byte(a.Cfg.AdminPassword))
+	_, _ = mac.Write([]byte(msg))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return fmt.Sprintf("%d:%s", exp, sig)
+}
+
+func (a *App) verifyAdminSession(v string) bool {
+	parts := strings.SplitN(v, ":", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	exp, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || time.Now().Unix() > exp {
+		return false
+	}
+	expected := a.signAdminSession(exp)
+	return hmac.Equal([]byte(v), []byte(expected))
+}
+
+func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		_ = r.ParseForm()
+		if r.FormValue("username") == a.Cfg.AdminUsername && r.FormValue("password") == a.Cfg.AdminPassword {
+			exp := time.Now().Add(12 * time.Hour)
+			http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: a.signAdminSession(exp.Unix()), Path: "/", Expires: exp, MaxAge: int(12 * time.Hour / time.Second), HttpOnly: true, SameSite: http.SameSiteLaxMode})
+			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
 		}
-		next.ServeHTTP(w, r)
-	})
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("admin login failed"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(`<html><head><meta charset="utf-8"><title>Admin Login</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;background:#eef6ff;display:grid;place-items:center;height:100vh;margin:0}.card{background:white;border:1px solid #dbe4ef;border-radius:18px;padding:24px;box-shadow:0 20px 50px rgba(15,23,42,.12);width:340px}input,button{width:100%;box-sizing:border-box;padding:10px;margin:8px 0;border-radius:10px;border:1px solid #dbe4ef}button{background:#2563eb;color:#fff;font-weight:700;cursor:pointer}</style></head><body><form class="card" method="post"><h2>devops-worker 管理员登录</h2><p>管理员会话有效期 12 小时。普通用户无需登录。</p><input name="username" placeholder="管理员账号" required><input name="password" type="password" placeholder="管理员密码" required><button type="submit">登录</button><a href="/">以普通用户进入</a></form></body></html>`))
+}
+
+func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (a *App) render(w http.ResponseWriter, templateName string, data PageData) {
@@ -105,8 +179,11 @@ func (a *App) basePage(r *http.Request, title string) PageData {
 	now := time.Now().In(loc)
 	cfg := a.Cfg
 	cfg.Timezone = tz
+	role := a.role(r)
 	return PageData{
 		Title:           title,
+		Role:            role,
+		IsAdmin:         role == "admin",
 		Config:          cfg,
 		NowYear:         now.Year(),
 		NowMonth:        int(now.Month()),
@@ -189,7 +266,7 @@ func (a *App) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 	tgID := parseFormInt64(r.FormValue("telegram_user_id"))
 	users, _ := a.Store.LoadUsers()
 	now := time.Now().Format(time.RFC3339)
-	users = append(users, StaffUser{ID: newID("user"), Name: name, TelegramUserID: tgID, Enabled: true, CreatedAt: now, UpdatedAt: now})
+	users = append(users, StaffUser{ID: newID("user"), Name: name, TelegramUserID: tgID, Enabled: true, CreatedBy: a.role(r), CreatedAt: now, UpdatedAt: now})
 	if err := a.Store.SaveUsers(users); err != nil {
 		log.Printf("save user error: %v", err)
 	}
@@ -206,6 +283,10 @@ func (a *App) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 	users, _ := a.Store.LoadUsers()
 	for i := range users {
 		if users[i].ID == id {
+			if !a.isAdmin(r) && users[i].CreatedBy != "user" {
+				a.renderError(w, "用户管理", "普通用户只能修改自己新建的用户，不能修改既有/admin 用户")
+				return
+			}
 			users[i].Name = strings.TrimSpace(r.FormValue("name"))
 			users[i].TelegramUserID = parseFormInt64(r.FormValue("telegram_user_id"))
 			users[i].Enabled = r.FormValue("enabled") == "true"
@@ -219,6 +300,10 @@ func (a *App) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleUserDelete(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdmin(r) {
+		http.Error(w, "普通用户无删除权限", http.StatusForbidden)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Redirect(w, r, "/users", http.StatusSeeOther)
 		return
@@ -263,6 +348,7 @@ func (a *App) handleShiftCreate(w http.ResponseWriter, r *http.Request) {
 		End:       r.FormValue("end"),
 		Timezone:  r.FormValue("timezone"),
 		Enabled:   true,
+		CreatedBy: a.role(r),
 	})
 	if err != nil {
 		a.renderError(w, "班次设置", err.Error())
@@ -295,6 +381,10 @@ func (a *App) handleShiftUpdate(w http.ResponseWriter, r *http.Request) {
 	for i := range shifts {
 		if shifts[i].Code == code {
 			old := shifts[i]
+			if !a.isAdmin(r) && old.CreatedBy != "user" {
+				a.renderError(w, "班次设置", "普通用户只能修改自己新建的班次，默认/admin 班次只能查看")
+				return
+			}
 			candidate := Shift{
 				Code:      old.Code,
 				Name:      r.FormValue("name"),
@@ -303,6 +393,7 @@ func (a *App) handleShiftUpdate(w http.ResponseWriter, r *http.Request) {
 				End:       r.FormValue("end"),
 				Timezone:  r.FormValue("timezone"),
 				Enabled:   r.FormValue("enabled") != "false",
+				CreatedBy: old.CreatedBy,
 			}
 			sh, err := normalizeShift(candidate)
 			if err != nil {
@@ -331,6 +422,10 @@ func (a *App) handleShiftUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleShiftDelete(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdmin(r) {
+		http.Error(w, "普通用户无删除权限", http.StatusForbidden)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Redirect(w, r, "/shifts", http.StatusSeeOther)
 		return
@@ -376,7 +471,7 @@ func (a *App) handleScheduleSubmit(w http.ResponseWriter, r *http.Request) {
 	month, _ := strconv.Atoi(r.FormValue("month"))
 	createdBy := strings.TrimSpace(r.FormValue("created_by"))
 	if createdBy == "" {
-		createdBy = "web"
+		createdBy = a.role(r)
 	}
 	users, err := a.Store.LoadUsers()
 	if err != nil {

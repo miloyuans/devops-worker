@@ -406,6 +406,19 @@ func sanitizeFileName(s string) string {
 	return b.String()
 }
 
+func shiftNeedsNotificationCode(code string) bool {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "rest", "annual_leave", "sick_leave":
+		return false
+	default:
+		return true
+	}
+}
+
+func shiftNeedsNotification(item ScheduleItem) bool {
+	return shiftNeedsNotificationCode(item.ShiftCode)
+}
+
 func notificationItemKey(item ScheduleItem) string {
 	return item.Date + "|" + item.StaffID + "|" + item.ShiftCode + "|" + item.StartTime
 }

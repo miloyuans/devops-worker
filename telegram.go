@@ -394,13 +394,18 @@ func (t *TelegramService) handleCallback(cq *telegramCallbackQuery) {
 	case "noop":
 		t.answerCallback(cq.ID, "该审批已经结束", false)
 	case "read":
-		rec, err := t.Store.MarkNotificationRead(approvalID, reviewerID)
+		rec, firstRead, err := t.Store.MarkNotificationRead(approvalID, reviewerID)
 		if err != nil {
 			t.answerCallback(cq.ID, "确认失败: "+err.Error(), true)
 			return
 		}
-		t.answerCallback(cq.ID, "已记录已读", false)
-		t.replyToCallbackMessage(cq, fmt.Sprintf("✅ 已读确认\n员工: %s\n日期: %s\n班次: %s", rec.StaffName, rec.Date, rec.ShiftName))
+		if firstRead {
+			t.answerCallback(cq.ID, "已记录已读", false)
+			t.editCallbackMessageMarkup(cq, readDoneMarkup())
+		} else {
+			t.answerCallback(cq.ID, fmt.Sprintf("%s 已确认，无需重复点击", rec.StaffName), false)
+			t.editCallbackMessageMarkup(cq, readDoneMarkup())
+		}
 	default:
 		t.answerCallback(cq.ID, "未知操作", true)
 	}
@@ -458,6 +463,37 @@ func (t *TelegramService) replyToCallbackMessage(cq *telegramCallbackQuery, text
 	_ = t.sendMessage(cq.Message.Chat.ID, cq.Message.MessageThreadID, text, "")
 }
 
+func readDoneMarkup() any {
+	return map[string]any{"inline_keyboard": [][]map[string]string{{{"text": "✅ 已读", "callback_data": "noop:read"}}}}
+}
+
+func (t *TelegramService) editCallbackMessageMarkup(cq *telegramCallbackQuery, replyMarkup any) {
+	if cq == nil || cq.Message == nil {
+		return
+	}
+	if err := t.editMessageReplyMarkup(cq.Message.Chat.ID, cq.Message.MessageID, replyMarkup); err != nil {
+		log.Printf("edit read markup failed: %v", err)
+	}
+}
+
+func (t *TelegramService) editMessageReplyMarkup(chatID int64, messageID int, replyMarkup any) error {
+	vals := url.Values{}
+	vals.Set("chat_id", strconv.FormatInt(chatID, 10))
+	vals.Set("message_id", strconv.Itoa(messageID))
+	if replyMarkup != nil {
+		rm, _ := json.Marshal(replyMarkup)
+		vals.Set("reply_markup", string(rm))
+	}
+	var resp telegramAPIResponse[json.RawMessage]
+	if err := t.postForm("editMessageReplyMarkup", vals, &resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf(resp.Description)
+	}
+	return nil
+}
+
 func (t *TelegramService) handleText(msg *telegramMessage) {
 	text := msg.Text
 	keywords := []string{"值班", "排班", "谁值班", "值班人员", "今天谁值班"}
@@ -506,6 +542,9 @@ func (t *TelegramService) checkAndNotify() {
 	}
 	target := time.Now().In(t.Loc).Add(30 * time.Minute).Format("2006-01-02 15:04")
 	for _, item := range active.Items {
+		if !shiftNeedsNotification(item) {
+			continue
+		}
 		start, err := time.Parse(time.RFC3339, item.StartTime)
 		if err != nil || start.In(t.Loc).Format("2006-01-02 15:04") != target {
 			continue
