@@ -29,6 +29,12 @@ type contextKey string
 const roleContextKey contextKey = "role"
 const adminCookieName = "devops_worker_admin"
 
+func setNoStoreHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+}
+
 func (a *App) routes() http.Handler {
 	appMux := http.NewServeMux()
 	appMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -61,6 +67,7 @@ func (a *App) routes() http.Handler {
 
 func (a *App) roleMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setNoStoreHeaders(w)
 		role := "user"
 		if a.isAdmin(r) {
 			role = "admin"
@@ -81,9 +88,6 @@ func (a *App) role(r *http.Request) string {
 }
 
 func (a *App) isAdmin(r *http.Request) bool {
-	if user, pass, ok := r.BasicAuth(); ok && user == a.Cfg.AdminUsername && pass == a.Cfg.AdminPassword {
-		return true
-	}
 	c, err := r.Cookie(adminCookieName)
 	if err != nil || c.Value == "" {
 		return false
@@ -113,6 +117,7 @@ func (a *App) verifyAdminSession(v string) bool {
 }
 
 func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
+	setNoStoreHeaders(w)
 	if r.Method == http.MethodPost {
 		_ = r.ParseForm()
 		if r.FormValue("username") == a.Cfg.AdminUsername && r.FormValue("password") == a.Cfg.AdminPassword {
@@ -126,12 +131,13 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(`<html><head><meta charset="utf-8"><title>Admin Login</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;background:#eef6ff;display:grid;place-items:center;height:100vh;margin:0}.card{background:white;border:1px solid #dbe4ef;border-radius:18px;padding:24px;box-shadow:0 20px 50px rgba(15,23,42,.12);width:340px}input,button{width:100%;box-sizing:border-box;padding:10px;margin:8px 0;border-radius:10px;border:1px solid #dbe4ef}button{background:#2563eb;color:#fff;font-weight:700;cursor:pointer}</style></head><body><form class="card" method="post"><h2>devops-worker 管理员登录</h2><p>管理员会话有效期 12 小时。普通用户无需登录。</p><input name="username" placeholder="管理员账号" required><input name="password" type="password" placeholder="管理员密码" required><button type="submit">登录</button><a href="/">以普通用户进入</a></form></body></html>`))
+	_, _ = w.Write([]byte(`<html><head><meta charset="utf-8"><title>Admin Login</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;background:#eef6ff;display:grid;place-items:center;height:100vh;margin:0}.card{background:white;border:1px solid #dbe4ef;border-radius:18px;padding:24px;box-shadow:0 20px 50px rgba(15,23,42,.12);width:340px}input,button{width:100%;box-sizing:border-box;padding:10px;margin:8px 0;border-radius:10px;border:1px solid #dbe4ef}button{background:#2563eb;color:#fff;font-weight:700;cursor:pointer}</style></head><body><form class="card" method="post"><h2>devops-worker 管理员登录</h2><p>请输入管理员账号和密码。</p><input name="username" placeholder="管理员账号" required><input name="password" type="password" placeholder="管理员密码" required><button type="submit">登录</button><a href="/">以普通用户进入</a></form></body></html>`))
 }
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	setNoStoreHeaders(w)
+	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	http.Redirect(w, r, "/?logout=1", http.StatusSeeOther)
 }
 
 func (a *App) render(w http.ResponseWriter, templateName string, data PageData) {
@@ -141,6 +147,7 @@ func (a *App) render(w http.ResponseWriter, templateName string, data PageData) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	setNoStoreHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(buf.Bytes())
 }

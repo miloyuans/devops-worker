@@ -9,7 +9,7 @@ FROM alpine:3.20
 WORKDIR /app
 RUN apk add --no-cache ca-certificates tzdata
 COPY --from=builder /out/devops-worker /app/devops-worker
-ENV DATA_DIR=/app/data WEB_ADDR=:8080 APP_TIMEZONE=Asia/Shanghai
+ENV DATA_DIR=/app/data WEB_ADDR=:8080 APP_TIMEZONE=Asia/Dubai WORK_ORDER_URL=
 VOLUME ["/app/data"]
 EXPOSE 8080
 ENTRYPOINT ["/app/devops-worker"]
