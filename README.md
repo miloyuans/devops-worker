@@ -37,7 +37,7 @@ CGO_ENABLED=0 go build -o devops-worker .
 http://服务器IP:8080
 ```
 
-默认管理员登录：
+默认 Web Basic Auth：
 
 ```text
 admin / change_me
@@ -54,11 +54,10 @@ admin / change_me
 | `GROUP_CHAT_TOPICS` | 可选，格式：`chatID:topicID,chatID:topicID`。 |
 | `APPROVER_USER_IDS` | 指定审批人的 Telegram user ID，逗号分隔。只有这些用户点同意/拒绝才有效。 |
 | `WEB_ADDR` | Web 监听地址，默认 `:8080`。 |
-| `WORK_ORDER_URL` | Telegram 上班提醒里展示的排班工单/Web 页面地址，可为空。 |
 | `DATA_DIR` | 数据目录，默认 `./data`。容器部署时必须挂载持久卷。 |
 | `APP_TIMEZONE` | Telegram 定时提醒的默认时区，默认 `Asia/Dubai`。Web 页面右上角可单独下拉选择展示时区，默认也是 `Asia/Dubai`。 |
-| `ADMIN_USERNAME` | 管理员登录用户名。 |
-| `ADMIN_PASSWORD` | 管理员登录密码。 |
+| `ADMIN_USERNAME` | Web Basic Auth 用户名。 |
+| `ADMIN_PASSWORD` | Web Basic Auth 密码。 |
 
 ## Telegram 设置
 

@@ -16,7 +16,6 @@ func loadConfig() Config {
 		Timezone:        envOr("APP_TIMEZONE", DefaultShiftTimezone),
 		AdminUsername:   envOr("ADMIN_USERNAME", "admin"),
 		AdminPassword:   envOr("ADMIN_PASSWORD", "change_me"),
-		WorkOrderURL:    envFirst("WORK_ORDER_URL", "WEB_PUBLIC_URL", "PUBLIC_BASE_URL"),
 		GroupChatIDs:    parseInt64List(os.Getenv("GROUP_CHAT_IDS")),
 		ApproverUserIDs: parseInt64List(os.Getenv("APPROVER_USER_IDS")),
 	}
@@ -42,15 +41,6 @@ func loadConfig() Config {
 		log.Printf("WARN: APPROVER_USER_IDS 未设置，审批按钮将无法通过权限校验")
 	}
 	return cfg
-}
-
-func envFirst(keys ...string) string {
-	for _, key := range keys {
-		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-			return v
-		}
-	}
-	return ""
 }
 
 func envOr(key, fallback string) string {

@@ -571,13 +571,7 @@ func (t *TelegramService) checkAndNotify() {
 			if item.TelegramUserID > 0 {
 				mention = fmt.Sprintf("<a href=\"tg://user?id=%d\">%s</a>", item.TelegramUserID, html.EscapeString(item.StaffName))
 			}
-			body := fmt.Sprintf("⏰ <b>上班提醒</b>\n\n员工: %s\n班次: %s\n时间: %s", mention, html.EscapeString(item.ShiftName), html.EscapeString(formatClock(item.StartTime)))
-			footer := "还有 30 分钟开始值班，请注意交接。"
-			if strings.TrimSpace(t.Cfg.WorkOrderURL) != "" {
-				body += fmt.Sprintf("\n\n排班工单: %s", html.EscapeString(strings.TrimSpace(t.Cfg.WorkOrderURL)))
-				footer = "还有 30 分钟开始值班，请注意交接, 如需查阅变更请使用工单。"
-			}
-			body += "\n\n" + footer
+			body := fmt.Sprintf("⏰ <b>上班提醒</b>\n\n员工: %s\n班次: %s\n时间: %s\n\n还有 30 分钟开始值班，请注意交接。", mention, html.EscapeString(item.ShiftName), html.EscapeString(formatClock(item.StartTime)))
 			replyMarkup := map[string]any{"inline_keyboard": [][]map[string]string{{{"text": "我已读", "callback_data": "read:" + record.ID}}}}
 			if err := t.sendMessageWithMarkup(chatID, t.getThreadID(chatID, 0), body, "HTML", replyMarkup); err != nil {
 				log.Printf("send reminder failed: %v", err)

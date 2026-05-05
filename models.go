@@ -10,7 +10,6 @@ type Config struct {
 	Timezone        string
 	AdminUsername   string
 	AdminPassword   string
-	WorkOrderURL    string
 }
 
 type Shift struct {
