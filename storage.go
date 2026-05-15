@@ -54,13 +54,13 @@ func (s *Storage) Init() error {
 
 func defaultShifts() []Shift {
 	return []Shift{
-		{Code: "morning", Name: "早班", ShortName: "早", Start: "09:00", End: "18:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true, CreatedBy: "system"},
-		{Code: "middle", Name: "中班", ShortName: "中", Start: "15:00", End: "24:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("15:00", "24:00"), Enabled: true, CreatedBy: "system"},
-		{Code: "night", Name: "晚班", ShortName: "晚", Start: "00:00", End: "09:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "09:00"), Enabled: true, CreatedBy: "system"},
-		{Code: "normal", Name: "正常班", ShortName: "正常", Start: "09:00", End: "18:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true, CreatedBy: "system"},
-		{Code: "rest", Name: "休息", ShortName: "休", Start: "00:00", End: "23:59", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "23:59"), Enabled: true, CreatedBy: "system"},
-		{Code: "annual_leave", Name: "年假", ShortName: "年", Start: "00:00", End: "23:59", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "23:59"), Enabled: true, CreatedBy: "system"},
-		{Code: "sick_leave", Name: "病假", ShortName: "病", Start: "00:00", End: "23:59", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "23:59"), Enabled: true, CreatedBy: "system"},
+		{Code: "morning", Name: "早班", ShortName: "早", Start: "09:00", End: "18:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true, NotifyEnabled: boolPtr(true), CreatedBy: "system"},
+		{Code: "middle", Name: "中班", ShortName: "中", Start: "15:00", End: "24:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("15:00", "24:00"), Enabled: true, NotifyEnabled: boolPtr(true), CreatedBy: "system"},
+		{Code: "night", Name: "晚班", ShortName: "晚", Start: "00:00", End: "09:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "09:00"), Enabled: true, NotifyEnabled: boolPtr(true), CreatedBy: "system"},
+		{Code: "normal", Name: "正常班", ShortName: "正常", Start: "09:00", End: "18:00", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("09:00", "18:00"), Enabled: true, NotifyEnabled: boolPtr(true), CreatedBy: "system"},
+		{Code: "rest", Name: "休息", ShortName: "休", Start: "00:00", End: "23:59", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "23:59"), Enabled: true, NotifyEnabled: boolPtr(false), CreatedBy: "system"},
+		{Code: "annual_leave", Name: "年假", ShortName: "年", Start: "00:00", End: "23:59", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "23:59"), Enabled: true, NotifyEnabled: boolPtr(false), CreatedBy: "system"},
+		{Code: "sick_leave", Name: "病假", ShortName: "病", Start: "00:00", End: "23:59", Timezone: DefaultShiftTimezone, CrossDay: deriveCrossDay("00:00", "23:59"), Enabled: true, NotifyEnabled: boolPtr(false), CreatedBy: "system"},
 	}
 }
 
@@ -82,6 +82,10 @@ func (s *Storage) ensureDefaultShifts() error {
 			}
 			if shifts[i].Timezone == "" {
 				shifts[i].Timezone = DefaultShiftTimezone
+				changed = true
+			}
+			if shifts[i].NotifyEnabled == nil {
+				shifts[i].NotifyEnabled = boolPtr(shiftNeedsNotificationCode(shifts[i].Code))
 				changed = true
 			}
 			cross := deriveCrossDay(shifts[i].Start, shifts[i].End)
@@ -1036,11 +1040,17 @@ func (s *Storage) UpdateFutureItemsForShift(shift Shift, loc *time.Location) (Sh
 			if err != nil {
 				return err
 			}
-			active.Items[i].ShiftName = shift.Name
-			active.Items[i].ShiftShortName = shift.ShortName
-			active.Items[i].StartTime = start.Format(time.RFC3339)
-			active.Items[i].EndTime = end.Format(time.RFC3339)
-			changed++
+			newStart := start.Format(time.RFC3339)
+			newEnd := end.Format(time.RFC3339)
+			notifyEnabled := shiftNotificationEnabled(shift)
+			if active.Items[i].ShiftName != shift.Name || active.Items[i].ShiftShortName != shift.ShortName || active.Items[i].StartTime != newStart || active.Items[i].EndTime != newEnd || active.Items[i].NotifyEnabled == nil || *active.Items[i].NotifyEnabled != notifyEnabled {
+				active.Items[i].ShiftName = shift.Name
+				active.Items[i].ShiftShortName = shift.ShortName
+				active.Items[i].StartTime = newStart
+				active.Items[i].EndTime = newEnd
+				active.Items[i].NotifyEnabled = boolPtr(notifyEnabled)
+				changed++
+			}
 		}
 		if changed == 0 {
 			summary = ShiftUpdateSummary{ChangedItems: 0, NewRevision: active.Revision, VersionID: active.VersionID}
@@ -1253,11 +1263,13 @@ func (s *Storage) SyncActiveItemsWithLatestShifts(loc *time.Location) (ShiftUpda
 			}
 			newStart := start.Format(time.RFC3339)
 			newEnd := end.Format(time.RFC3339)
-			if item.ShiftName != shift.Name || item.ShiftShortName != shift.ShortName || item.StartTime != newStart || item.EndTime != newEnd || (userOK && (item.StaffName != user.Name || item.TelegramUserID != user.TelegramUserID)) {
+			notifyEnabled := shiftNotificationEnabled(shift)
+			if item.ShiftName != shift.Name || item.ShiftShortName != shift.ShortName || item.StartTime != newStart || item.EndTime != newEnd || item.NotifyEnabled == nil || *item.NotifyEnabled != notifyEnabled || (userOK && (item.StaffName != user.Name || item.TelegramUserID != user.TelegramUserID)) {
 				item.ShiftName = shift.Name
 				item.ShiftShortName = shift.ShortName
 				item.StartTime = newStart
 				item.EndTime = newEnd
+				item.NotifyEnabled = boolPtr(notifyEnabled)
 				if userOK {
 					item.StaffName = user.Name
 					item.TelegramUserID = user.TelegramUserID

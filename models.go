@@ -14,15 +14,16 @@ type Config struct {
 }
 
 type Shift struct {
-	Code      string `json:"code"`
-	Name      string `json:"name"`
-	ShortName string `json:"short_name"`
-	Start     string `json:"start"`
-	End       string `json:"end"`
-	Timezone  string `json:"timezone"`
-	CrossDay  bool   `json:"cross_day"`
-	Enabled   bool   `json:"enabled"`
-	CreatedBy string `json:"created_by,omitempty"` // system/admin/user，用于 Web 权限隔离
+	Code          string `json:"code"`
+	Name          string `json:"name"`
+	ShortName     string `json:"short_name"`
+	Start         string `json:"start"`
+	End           string `json:"end"`
+	Timezone      string `json:"timezone"`
+	CrossDay      bool   `json:"cross_day"`
+	Enabled       bool   `json:"enabled"`
+	NotifyEnabled *bool  `json:"notify_enabled,omitempty"`
+	CreatedBy     string `json:"created_by,omitempty"` // system/admin/user，用于 Web 权限隔离
 }
 
 type ShiftConfig struct {
@@ -71,6 +72,7 @@ type ScheduleItem struct {
 	ShiftShortName string `json:"shift_short_name"`
 	StartTime      string `json:"start_time"`
 	EndTime        string `json:"end_time"`
+	NotifyEnabled  *bool  `json:"notify_enabled,omitempty"`
 }
 
 type ScheduleItemStatus struct {

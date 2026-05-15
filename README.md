@@ -204,3 +204,9 @@ volumeMounts:
 - 如果检测到当天全部任务都已 `sent` 或 `cancelled`，调度器会停止 300 秒循环扫描，休眠到下一个本地日期。
 - 如果当天发生审批通过、班次调整、用户/班次禁用清理、排班一致性校准等事件，系统会唤醒通知队列调度器，重新同步并消费新增或刷新的任务。
 - 这样可以避免当天任务全部完成后继续空跑扫描，同时不会影响当天后续排班变更产生的新通知任务。
+
+## Recent updates
+
+- Shift codes are now generated automatically as unique random strings when creating a new shift. Operators no longer need to enter or maintain shift codes manually.
+- Shifts now include a `notify_enabled` setting. Custom shifts can opt out of Telegram reminder notifications. Rest, annual leave, and sick leave default to no notification.
+- Schedule calendar selection supports range picking: click a start date, then click an end date to automatically select the full range. Ctrl/Cmd-click can still be used for manual multi-select adjustments.

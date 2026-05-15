@@ -53,6 +53,7 @@ func BuildScheduleItems(rules []ScheduleRule, users []StaffUser, shifts []Shift,
 				if !ok {
 					return nil, fmt.Errorf("未知或已禁用用户: %s", staffID)
 				}
+				notifyEnabled := shiftNotificationEnabled(shift)
 				item := ScheduleItem{
 					Date:           date.Format("2006-01-02"),
 					StaffID:        staff.ID,
@@ -63,6 +64,7 @@ func BuildScheduleItems(rules []ScheduleRule, users []StaffUser, shifts []Shift,
 					ShiftShortName: shift.ShortName,
 					StartTime:      start.Format(time.RFC3339),
 					EndTime:        end.Format(time.RFC3339),
+					NotifyEnabled:  boolPtr(notifyEnabled),
 				}
 				byKey[item.Date+"|"+item.StaffID] = item
 			}
@@ -332,6 +334,9 @@ func normalizeShift(sh Shift) (Shift, error) {
 	if sh.Code == "" || sh.Name == "" || sh.ShortName == "" || sh.Start == "" || sh.End == "" {
 		return sh, fmt.Errorf("班次编码、名称、简称、开始和结束时间都不能为空")
 	}
+	if sh.NotifyEnabled == nil {
+		sh.NotifyEnabled = boolPtr(shiftNeedsNotificationCode(sh.Code))
+	}
 	loc, err := time.LoadLocation(sh.Timezone)
 	if err != nil {
 		return sh, fmt.Errorf("时区无效: %s", sh.Timezone)
@@ -402,6 +407,22 @@ func newID(prefix string) string {
 	return fmt.Sprintf("%s_%s_%s", prefix, time.Now().Format("20060102_150405"), hex.EncodeToString(buf))
 }
 
+func newShiftCode(existing []Shift) string {
+	used := map[string]bool{}
+	for _, sh := range existing {
+		used[strings.ToLower(strings.TrimSpace(sh.Code))] = true
+	}
+	for i := 0; i < 32; i++ {
+		buf := make([]byte, 5)
+		_, _ = rand.Read(buf)
+		code := "shift_" + hex.EncodeToString(buf)
+		if !used[strings.ToLower(code)] {
+			return code
+		}
+	}
+	return sanitizeFileName(newID("shift"))
+}
+
 func newVersionID(revision int) string {
 	buf := make([]byte, 3)
 	_, _ = rand.Read(buf)
@@ -436,6 +457,11 @@ func sanitizeFileName(s string) string {
 	return b.String()
 }
 
+func boolPtr(v bool) *bool {
+	b := v
+	return &b
+}
+
 func shiftNeedsNotificationCode(code string) bool {
 	switch strings.ToLower(strings.TrimSpace(code)) {
 	case "rest", "annual_leave", "sick_leave":
@@ -445,7 +471,17 @@ func shiftNeedsNotificationCode(code string) bool {
 	}
 }
 
+func shiftNotificationEnabled(shift Shift) bool {
+	if shift.NotifyEnabled != nil {
+		return *shift.NotifyEnabled
+	}
+	return shiftNeedsNotificationCode(shift.Code)
+}
+
 func shiftNeedsNotification(item ScheduleItem) bool {
+	if item.NotifyEnabled != nil {
+		return *item.NotifyEnabled
+	}
 	return shiftNeedsNotificationCode(item.ShiftCode)
 }
 

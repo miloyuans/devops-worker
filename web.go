@@ -381,32 +381,35 @@ func (a *App) handleShifts(w http.ResponseWriter, r *http.Request) {
 	a.render(w, "shifts", data)
 }
 
+func formBoolPtr(r *http.Request, name string, defaultValue bool) *bool {
+	v := strings.TrimSpace(r.FormValue(name))
+	if v == "" {
+		return boolPtr(defaultValue)
+	}
+	return boolPtr(v == "true" || v == "on" || v == "1" || strings.EqualFold(v, "yes"))
+}
+
 func (a *App) handleShiftCreate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Redirect(w, r, "/shifts", http.StatusSeeOther)
 		return
 	}
 	_ = r.ParseForm()
+	shifts, _ := a.Store.LoadShifts()
 	shift, err := normalizeShift(Shift{
-		Code:      r.FormValue("code"),
-		Name:      r.FormValue("name"),
-		ShortName: r.FormValue("short_name"),
-		Start:     r.FormValue("start"),
-		End:       r.FormValue("end"),
-		Timezone:  r.FormValue("timezone"),
-		Enabled:   true,
-		CreatedBy: a.role(r),
+		Code:          newShiftCode(shifts),
+		Name:          r.FormValue("name"),
+		ShortName:     r.FormValue("short_name"),
+		Start:         r.FormValue("start"),
+		End:           r.FormValue("end"),
+		Timezone:      r.FormValue("timezone"),
+		Enabled:       true,
+		NotifyEnabled: formBoolPtr(r, "notify_enabled", true),
+		CreatedBy:     a.role(r),
 	})
 	if err != nil {
 		a.renderError(w, "班次设置", err.Error())
 		return
-	}
-	shifts, _ := a.Store.LoadShifts()
-	for _, sh := range shifts {
-		if sh.Code == shift.Code {
-			a.renderError(w, "班次设置", "班次编码已存在")
-			return
-		}
 	}
 	shifts = append(shifts, shift)
 	if err := a.Store.SaveShifts(shifts); err != nil {
@@ -433,14 +436,15 @@ func (a *App) handleShiftUpdate(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			candidate := Shift{
-				Code:      old.Code,
-				Name:      r.FormValue("name"),
-				ShortName: r.FormValue("short_name"),
-				Start:     r.FormValue("start"),
-				End:       r.FormValue("end"),
-				Timezone:  r.FormValue("timezone"),
-				Enabled:   r.FormValue("enabled") != "false",
-				CreatedBy: old.CreatedBy,
+				Code:          old.Code,
+				Name:          r.FormValue("name"),
+				ShortName:     r.FormValue("short_name"),
+				Start:         r.FormValue("start"),
+				End:           r.FormValue("end"),
+				Timezone:      r.FormValue("timezone"),
+				Enabled:       r.FormValue("enabled") != "false",
+				NotifyEnabled: formBoolPtr(r, "notify_enabled", shiftNotificationEnabled(old)),
+				CreatedBy:     old.CreatedBy,
 			}
 			sh, err := normalizeShift(candidate)
 			if err != nil {
