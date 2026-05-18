@@ -222,52 +222,139 @@ func ApplyAutoRestDefaults(changes []ScheduleDraftChange, year int, month int, s
 	if len(explicit) == 0 {
 		return explicit
 	}
+
 	shiftMap := map[string]Shift{}
 	for _, sh := range shifts {
-		shiftMap[sh.Code] = sh
+		if sh.Code != "" {
+			shiftMap[sh.Code] = sh
+		}
 	}
-	rest, ok := shiftMap["rest"]
-	if !ok || rest.Code == "" {
+	restShift, hasRest := findRestShift(shifts)
+	if !hasRest {
 		return explicit
 	}
-	_ = rest
+
+	// Default monthly templates are inferred from explicit user edits:
+	// - Early/morning shift: weekdays are morning, Saturdays and Sundays are rest.
+	// - Normal shift: Monday-Saturday are normal, Sundays are rest.
+	// - Annual leave: selecting the first day expands to 15 consecutive calendar days.
+	// Explicit draft edits are appended after auto defaults, so manual/custom choices always win.
 	auto := []ScheduleDraftChange{}
-	seenMorning := map[string]bool{}
-	seenNormal := map[string]bool{}
+	seenMorning := map[string]string{}             // staffID -> shiftCode
+	seenNormal := map[string]string{}              // staffID -> shiftCode
+	annualStarts := map[string]map[string]string{} // staffID -> date -> shiftCode
+
 	for _, ch := range explicit {
+		sh := shiftMap[ch.ShiftCode]
 		for _, staffID := range ch.StaffIDs {
-			sh := shiftMap[ch.ShiftCode]
+			staffID = strings.TrimSpace(staffID)
+			if staffID == "" {
+				continue
+			}
 			if isMorningShift(sh) {
-				seenMorning[staffID] = true
+				seenMorning[staffID] = ch.ShiftCode
 			}
 			if isNormalShift(sh) {
-				seenNormal[staffID] = true
+				seenNormal[staffID] = ch.ShiftCode
+			}
+			if isAnnualLeaveShift(sh) {
+				if annualStarts[staffID] == nil {
+					annualStarts[staffID] = map[string]string{}
+				}
+				for _, raw := range ch.Dates {
+					date := strings.TrimSpace(raw)
+					if date != "" {
+						annualStarts[staffID][date] = ch.ShiftCode
+					}
+				}
 			}
 		}
 	}
-	addRestDates := func(staffID string, includeSaturday bool) {
-		var dates []string
-		days := daysInMonth(year, time.Month(month))
-		for day := 1; day <= days; day++ {
+
+	monthDays := daysInMonth(year, time.Month(month))
+	for staffID, shiftCode := range seenMorning {
+		var workDates []string
+		var restDates []string
+		for day := 1; day <= monthDays; day++ {
 			d := time.Date(year, time.Month(month), day, 0, 0, 0, 0, loc)
-			if d.Weekday() == time.Sunday || (includeSaturday && d.Weekday() == time.Saturday) {
+			if d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
+				restDates = append(restDates, d.Format("2006-01-02"))
+			} else {
+				workDates = append(workDates, d.Format("2006-01-02"))
+			}
+		}
+		if len(workDates) > 0 {
+			auto = append(auto, ScheduleDraftChange{Dates: workDates, StaffIDs: []string{staffID}, ShiftCode: shiftCode})
+		}
+		if len(restDates) > 0 {
+			auto = append(auto, ScheduleDraftChange{Dates: restDates, StaffIDs: []string{staffID}, ShiftCode: restShift.Code})
+		}
+	}
+
+	for staffID, shiftCode := range seenNormal {
+		// If a user has a morning monthly template, it is more specific and already includes weekend rest.
+		if _, hasMorning := seenMorning[staffID]; hasMorning {
+			continue
+		}
+		var workDates []string
+		var restDates []string
+		for day := 1; day <= monthDays; day++ {
+			d := time.Date(year, time.Month(month), day, 0, 0, 0, 0, loc)
+			if d.Weekday() == time.Sunday {
+				restDates = append(restDates, d.Format("2006-01-02"))
+			} else {
+				workDates = append(workDates, d.Format("2006-01-02"))
+			}
+		}
+		if len(workDates) > 0 {
+			auto = append(auto, ScheduleDraftChange{Dates: workDates, StaffIDs: []string{staffID}, ShiftCode: shiftCode})
+		}
+		if len(restDates) > 0 {
+			auto = append(auto, ScheduleDraftChange{Dates: restDates, StaffIDs: []string{staffID}, ShiftCode: restShift.Code})
+		}
+	}
+
+	for staffID, starts := range annualStarts {
+		startDates := make([]string, 0, len(starts))
+		for date := range starts {
+			startDates = append(startDates, date)
+		}
+		sort.Strings(startDates)
+		for _, startRaw := range startDates {
+			startDate, err := time.ParseInLocation("2006-01-02", startRaw, loc)
+			if err != nil || startDate.Year() != year || int(startDate.Month()) != month {
+				continue
+			}
+			var dates []string
+			for i := 0; i < 15; i++ {
+				d := startDate.AddDate(0, 0, i)
+				if d.Year() != year || int(d.Month()) != month {
+					break
+				}
 				dates = append(dates, d.Format("2006-01-02"))
 			}
-		}
-		if len(dates) > 0 {
-			auto = append(auto, ScheduleDraftChange{Dates: dates, StaffIDs: []string{staffID}, ShiftCode: "rest"})
-		}
-	}
-	for staffID := range seenMorning {
-		addRestDates(staffID, true)
-	}
-	for staffID := range seenNormal {
-		if !seenMorning[staffID] {
-			addRestDates(staffID, false)
+			if len(dates) > 0 {
+				auto = append(auto, ScheduleDraftChange{Dates: dates, StaffIDs: []string{staffID}, ShiftCode: starts[startRaw]})
+			}
 		}
 	}
-	// Auto defaults are prepended so explicit user edits always win during normalization.
+
 	return NormalizeDraftChanges(append(auto, explicit...))
+}
+
+func findRestShift(shifts []Shift) (Shift, bool) {
+	for _, sh := range shifts {
+		if strings.EqualFold(strings.TrimSpace(sh.Code), "rest") {
+			return sh, true
+		}
+	}
+	for _, sh := range shifts {
+		name := sh.Name + sh.ShortName
+		if strings.Contains(name, "休") {
+			return sh, true
+		}
+	}
+	return Shift{}, false
 }
 
 func isMorningShift(sh Shift) bool {
@@ -278,6 +365,12 @@ func isMorningShift(sh Shift) bool {
 func isNormalShift(sh Shift) bool {
 	code := strings.ToLower(sh.Code)
 	return code == "normal" || strings.Contains(sh.Name, "正常") || strings.Contains(sh.ShortName, "正常")
+}
+
+func isAnnualLeaveShift(sh Shift) bool {
+	code := strings.ToLower(strings.TrimSpace(sh.Code))
+	name := sh.Name + sh.ShortName
+	return code == "annual_leave" || strings.Contains(name, "年假") || strings.Contains(name, "年")
 }
 
 func makeShiftTime(date time.Time, shift Shift, loc *time.Location) (time.Time, time.Time, error) {
