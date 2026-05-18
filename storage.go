@@ -52,6 +52,9 @@ func (s *Storage) Init() error {
 	if err := s.ensureDefaultDailyReportState(); err != nil {
 		return err
 	}
+	if err := s.ensureDefaultSSOSettings(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -171,6 +174,42 @@ func (s *Storage) ensureDefaultNotificationTaskState() error {
 		return nil
 	}
 	return writeJSONAtomic(path, NotificationTaskState{Tasks: []NotificationTask{}})
+}
+
+func (s *Storage) ensureDefaultSSOSettings() error {
+	path := filepath.Join(s.Dir, "config", "sso.json")
+	if fileExists(path) {
+		return nil
+	}
+	return writeJSONAtomic(path, SSOSettings{
+		Enabled:    false,
+		Scopes:     "openid profile email",
+		AdminRoles: []string{"devops-worker-admin", "admin"},
+		UserRoles:  []string{"devops-worker-user", "user"},
+	})
+}
+
+func (s *Storage) LoadSSOSettings() (SSOSettings, error) {
+	var settings SSOSettings
+	path := filepath.Join(s.Dir, "config", "sso.json")
+	if !fileExists(path) {
+		settings = SSOSettings{Enabled: false, Scopes: "openid profile email", AdminRoles: []string{"devops-worker-admin", "admin"}, UserRoles: []string{"devops-worker-user", "user"}}
+		return settings, nil
+	}
+	if err := readJSON(path, &settings); err != nil {
+		return settings, err
+	}
+	if strings.TrimSpace(settings.Scopes) == "" {
+		settings.Scopes = "openid profile email"
+	}
+	return settings, nil
+}
+
+func (s *Storage) SaveSSOSettings(settings SSOSettings) error {
+	return s.WithLock(func() error {
+		settings.UpdatedAt = time.Now().Format(time.RFC3339)
+		return writeJSONAtomic(filepath.Join(s.Dir, "config", "sso.json"), settings)
+	})
 }
 
 func (s *Storage) ensureDefaultDailyReportState() error {

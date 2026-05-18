@@ -22,6 +22,19 @@ type Config struct {
 	SSOAdminRoles    []string
 }
 
+type SSOSettings struct {
+	Enabled      bool     `json:"enabled"`
+	IssuerURL    string   `json:"issuer_url"`
+	ClientID     string   `json:"client_id"`
+	ClientSecret string   `json:"client_secret,omitempty"`
+	RedirectURL  string   `json:"redirect_url"`
+	Scopes       string   `json:"scopes"`
+	AdminUsers   []string `json:"admin_users"`
+	AdminRoles   []string `json:"admin_roles"`
+	UserRoles    []string `json:"user_roles"`
+	UpdatedAt    string   `json:"updated_at,omitempty"`
+}
+
 type Shift struct {
 	Code          string `json:"code"`
 	Name          string `json:"name"`
@@ -237,4 +250,5 @@ type PageData struct {
 	CalendarPrevMonth int
 	CalendarNextYear  int
 	CalendarNextMonth int
+	SSOSettings       SSOSettings
 }

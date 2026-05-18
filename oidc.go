@@ -15,6 +15,7 @@ import (
 )
 
 const oidcStateCookieName = "devops_worker_oidc_state"
+const ssoUserCookieName = "devops_worker_sso_user"
 
 type oidcDiscovery struct {
 	AuthorizationEndpoint string `json:"authorization_endpoint"`
@@ -32,14 +33,49 @@ type oidcTokenResponse struct {
 	Description string `json:"error_description"`
 }
 
+func (a *App) effectiveSSOSettings() SSOSettings {
+	settings, err := a.Store.LoadSSOSettings()
+	if err != nil {
+		log.Printf("load sso settings failed: %v", err)
+	}
+	// Environment values remain a bootstrap fallback. UI settings take precedence once saved.
+	if strings.TrimSpace(settings.IssuerURL) == "" {
+		settings.IssuerURL = a.Cfg.OIDCIssuerURL
+	}
+	if strings.TrimSpace(settings.ClientID) == "" {
+		settings.ClientID = a.effectiveSSOSettings().ClientID
+	}
+	if strings.TrimSpace(settings.ClientSecret) == "" {
+		settings.ClientSecret = a.effectiveSSOSettings().ClientSecret
+	}
+	if strings.TrimSpace(settings.RedirectURL) == "" {
+		settings.RedirectURL = a.effectiveSSOSettings().RedirectURL
+	}
+	if strings.TrimSpace(settings.Scopes) == "" {
+		settings.Scopes = a.effectiveSSOSettings().Scopes
+	}
+	if len(settings.AdminUsers) == 0 {
+		settings.AdminUsers = a.Cfg.SSOAdminUsers
+	}
+	if len(settings.AdminRoles) == 0 {
+		settings.AdminRoles = a.Cfg.SSOAdminRoles
+	}
+	if len(settings.UserRoles) == 0 {
+		settings.UserRoles = []string{"devops-worker-user", "user"}
+	}
+	return settings
+}
+
 func (a *App) ssoEnabled() bool {
-	return a.Cfg.SSOEnabled && strings.TrimSpace(a.Cfg.OIDCIssuerURL) != "" && strings.TrimSpace(a.Cfg.OIDCClientID) != "" && strings.TrimSpace(a.Cfg.OIDCRedirectURL) != ""
+	settings := a.effectiveSSOSettings()
+	return settings.Enabled && strings.TrimSpace(settings.IssuerURL) != "" && strings.TrimSpace(settings.ClientID) != "" && strings.TrimSpace(settings.RedirectURL) != ""
 }
 
 func (a *App) oidcDiscover() (oidcDiscovery, error) {
-	issuer := strings.TrimRight(strings.TrimSpace(a.Cfg.OIDCIssuerURL), "/")
+	settings := a.effectiveSSOSettings()
+	issuer := strings.TrimRight(strings.TrimSpace(settings.IssuerURL), "/")
 	if issuer == "" {
-		return oidcDiscovery{}, fmt.Errorf("OIDC_ISSUER_URL 未配置")
+		return oidcDiscovery{}, fmt.Errorf("OIDC issuer URL 未配置")
 	}
 	resp, err := http.Get(issuer + "/.well-known/openid-configuration")
 	if err != nil {
@@ -77,14 +113,14 @@ func (a *App) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 	cookieValue := state + ":" + nonce
 	http.SetCookie(w, &http.Cookie{Name: oidcStateCookieName, Value: cookieValue, Path: "/", MaxAge: 10 * 60, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 
-	scope := strings.TrimSpace(a.Cfg.OIDCScopes)
+	scope := strings.TrimSpace(a.effectiveSSOSettings().Scopes)
 	if scope == "" {
 		scope = "openid profile email"
 	}
 	q := url.Values{}
 	q.Set("response_type", "code")
-	q.Set("client_id", strings.TrimSpace(a.Cfg.OIDCClientID))
-	q.Set("redirect_uri", strings.TrimSpace(a.Cfg.OIDCRedirectURL))
+	q.Set("client_id", strings.TrimSpace(a.effectiveSSOSettings().ClientID))
+	q.Set("redirect_uri", strings.TrimSpace(a.effectiveSSOSettings().RedirectURL))
 	q.Set("scope", scope)
 	q.Set("state", state)
 	q.Set("nonce", nonce)
@@ -141,24 +177,32 @@ func (a *App) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 			log.Printf("oidc userinfo warning: %v", err)
 		}
 	}
-	if !a.oidcClaimsAreAdmin(claims) {
-		log.Printf("SSO login accepted but not admin: subject=%s username=%s email=%s roles=%v", claimString(claims, "sub"), claimString(claims, "preferred_username"), claimString(claims, "email"), collectRoles(claims))
-		http.Redirect(w, r, "/?sso=not_admin", http.StatusSeeOther)
+	if a.oidcClaimsAreAdmin(claims) {
+		exp := time.Now().Add(12 * time.Hour)
+		http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: a.signAdminSession(exp.Unix()), Path: "/", Expires: exp, MaxAge: int(12 * time.Hour / time.Second), HttpOnly: true, SameSite: http.SameSiteLaxMode})
+		http.SetCookie(w, &http.Cookie{Name: ssoUserCookieName, Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	exp := time.Now().Add(12 * time.Hour)
-	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: a.signAdminSession(exp.Unix()), Path: "/", Expires: exp, MaxAge: int(12 * time.Hour / time.Second), HttpOnly: true, SameSite: http.SameSiteLaxMode})
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	if a.oidcClaimsAreUser(claims) {
+		exp := time.Now().Add(12 * time.Hour)
+		username := firstNonEmpty(claimString(claims, "preferred_username"), claimString(claims, "email"), claimString(claims, "name"), claimString(claims, "sub"))
+		http.SetCookie(w, &http.Cookie{Name: ssoUserCookieName, Value: signSimpleSession(username, exp.Unix(), a.Cfg.AdminPassword), Path: "/", Expires: exp, MaxAge: int(12 * time.Hour / time.Second), HttpOnly: true, SameSite: http.SameSiteLaxMode})
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	log.Printf("SSO login rejected: subject=%s username=%s email=%s roles=%v", claimString(claims, "sub"), claimString(claims, "preferred_username"), claimString(claims, "email"), collectRoles(claims))
+	http.Redirect(w, r, "/?sso=forbidden", http.StatusSeeOther)
 }
 
 func (a *App) exchangeOIDCCode(tokenEndpoint string, code string) (oidcTokenResponse, error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
-	form.Set("redirect_uri", strings.TrimSpace(a.Cfg.OIDCRedirectURL))
-	form.Set("client_id", strings.TrimSpace(a.Cfg.OIDCClientID))
-	if strings.TrimSpace(a.Cfg.OIDCClientSecret) != "" {
-		form.Set("client_secret", strings.TrimSpace(a.Cfg.OIDCClientSecret))
+	form.Set("redirect_uri", strings.TrimSpace(a.effectiveSSOSettings().RedirectURL))
+	form.Set("client_id", strings.TrimSpace(a.effectiveSSOSettings().ClientID))
+	if strings.TrimSpace(a.effectiveSSOSettings().ClientSecret) != "" {
+		form.Set("client_secret", strings.TrimSpace(a.effectiveSSOSettings().ClientSecret))
 	}
 	req, err := http.NewRequest(http.MethodPost, tokenEndpoint, bytes.NewBufferString(form.Encode()))
 	if err != nil {
@@ -205,7 +249,8 @@ func fetchOIDCUserInfo(endpoint string, accessToken string) (map[string]any, err
 }
 
 func (a *App) oidcClaimsAreAdmin(claims map[string]any) bool {
-	allowedUsers := lowerSet(a.Cfg.SSOAdminUsers)
+	settings := a.effectiveSSOSettings()
+	allowedUsers := lowerSet(settings.AdminUsers)
 	if len(allowedUsers) > 0 {
 		ids := []string{claimString(claims, "sub"), claimString(claims, "preferred_username"), claimString(claims, "email"), claimString(claims, "name")}
 		for _, id := range ids {
@@ -214,7 +259,7 @@ func (a *App) oidcClaimsAreAdmin(claims map[string]any) bool {
 			}
 		}
 	}
-	allowedRoles := lowerSet(a.Cfg.SSOAdminRoles)
+	allowedRoles := lowerSet(settings.AdminRoles)
 	if len(allowedRoles) > 0 {
 		for _, role := range collectRoles(claims) {
 			if allowedRoles[strings.ToLower(strings.TrimSpace(role))] {
@@ -223,6 +268,34 @@ func (a *App) oidcClaimsAreAdmin(claims map[string]any) bool {
 		}
 	}
 	return false
+}
+
+func (a *App) oidcClaimsAreUser(claims map[string]any) bool {
+	settings := a.effectiveSSOSettings()
+	allowedRoles := lowerSet(settings.UserRoles)
+	if len(allowedRoles) == 0 {
+		return true
+	}
+	for _, role := range collectRoles(claims) {
+		if allowedRoles[strings.ToLower(strings.TrimSpace(role))] {
+			return true
+		}
+	}
+	return false
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return "sso-user"
+}
+
+func signSimpleSession(username string, exp int64, secret string) string {
+	msg := fmt.Sprintf("%s:%d", username, exp)
+	return base64.RawURLEncoding.EncodeToString([]byte(msg))
 }
 
 func randomURLToken(n int) string {

@@ -64,6 +64,8 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/approvals/approve", a.handleApprovalApprove)
 	mux.HandleFunc("/approvals/reject", a.handleApprovalReject)
 	mux.HandleFunc("/history", a.handleHistory)
+	mux.HandleFunc("/settings", a.handleSettings)
+	mux.HandleFunc("/settings/sso", a.handleSSOSettingsUpdate)
 	mux.Handle("/previews/", http.StripPrefix("/previews/", http.FileServer(http.Dir(filepath.Join(a.Cfg.DataDir, "previews")))))
 	appMux.Handle("/", a.roleMiddleware(mux))
 	return appMux
@@ -146,6 +148,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	setNoStoreHeaders(w)
 	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: ssoUserCookieName, Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, "/?logout=1", http.StatusSeeOther)
 }
 
@@ -698,6 +701,55 @@ func (a *App) handleApprovalReject(w http.ResponseWriter, r *http.Request) {
 		a.TG.editApprovalMessages(approval)
 	}
 	http.Redirect(w, r, "/approvals", http.StatusSeeOther)
+}
+
+func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdmin(r) {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	data := a.basePage(r, "系统设置")
+	data.SSOSettings = a.effectiveSSOSettings()
+	a.render(w, "settings", data)
+}
+
+func (a *App) handleSSOSettingsUpdate(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdmin(r) {
+		http.Error(w, "只有超级管理员可以修改 SSO 配置", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/settings", http.StatusSeeOther)
+		return
+	}
+	_ = r.ParseForm()
+	current := a.effectiveSSOSettings()
+	secret := strings.TrimSpace(r.FormValue("client_secret"))
+	if secret == "" && r.FormValue("keep_client_secret") == "true" {
+		secret = current.ClientSecret
+	}
+	settings := SSOSettings{
+		Enabled:      r.FormValue("enabled") == "true",
+		IssuerURL:    strings.TrimSpace(r.FormValue("issuer_url")),
+		ClientID:     strings.TrimSpace(r.FormValue("client_id")),
+		ClientSecret: secret,
+		RedirectURL:  strings.TrimSpace(r.FormValue("redirect_url")),
+		Scopes:       strings.TrimSpace(r.FormValue("scopes")),
+		AdminUsers:   parseStringList(r.FormValue("admin_users")),
+		AdminRoles:   parseStringList(r.FormValue("admin_roles")),
+		UserRoles:    parseStringList(r.FormValue("user_roles")),
+	}
+	if strings.TrimSpace(settings.Scopes) == "" {
+		settings.Scopes = "openid profile email"
+	}
+	if len(settings.UserRoles) == 0 {
+		settings.UserRoles = []string{"devops-worker-user", "user"}
+	}
+	if err := a.Store.SaveSSOSettings(settings); err != nil {
+		a.renderError(w, "系统设置", "保存 SSO 设置失败: "+err.Error())
+		return
+	}
+	http.Redirect(w, r, "/settings?saved=1", http.StatusSeeOther)
 }
 
 func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
