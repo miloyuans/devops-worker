@@ -45,6 +45,8 @@ func (a *App) routes() http.Handler {
 	})
 	appMux.HandleFunc("/login", a.handleLogin)
 	appMux.HandleFunc("/logout", a.handleLogout)
+	appMux.HandleFunc("/sso/login", a.handleSSOLogin)
+	appMux.HandleFunc("/sso/callback", a.handleSSOCallback)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleDashboard)
@@ -133,7 +135,12 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(`<html><head><meta charset="utf-8"><title>Admin Login</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;background:#eef6ff;display:grid;place-items:center;height:100vh;margin:0}.card{background:white;border:1px solid #dbe4ef;border-radius:18px;padding:24px;box-shadow:0 20px 50px rgba(15,23,42,.12);width:340px}input,button{width:100%;box-sizing:border-box;padding:10px;margin:8px 0;border-radius:10px;border:1px solid #dbe4ef}button{background:#2563eb;color:#fff;font-weight:700;cursor:pointer}</style></head><body><form class="card" method="post"><h2>devops-worker 管理员登录</h2><p>请输入管理员账号和密码。</p><input name="username" placeholder="管理员账号" required><input name="password" type="password" placeholder="管理员密码" required><button type="submit">登录</button><a href="/">以普通用户进入</a></form></body></html>`))
+	ssoButton := ""
+	if a.ssoEnabled() {
+		ssoButton = `<a class="sso" href="/sso/login">使用 Keycloak SSO 登录</a><div class="or">或使用本地管理员密码</div>`
+	}
+	page := fmt.Sprintf(`<html><head><meta charset="utf-8"><title>Admin Login</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;background:#eef6ff;display:grid;place-items:center;height:100vh;margin:0}.card{background:white;border:1px solid #dbe4ef;border-radius:18px;padding:24px;box-shadow:0 20px 50px rgba(15,23,42,.12);width:360px}h2{margin:0 0 10px}p{color:#64748b;font-size:13px}input,button,.sso{width:100%%;box-sizing:border-box;padding:10px;margin:8px 0;border-radius:10px;border:1px solid #dbe4ef}button,.sso{display:block;text-align:center;background:#2563eb;color:#fff;font-weight:700;cursor:pointer;text-decoration:none}.sso{background:linear-gradient(135deg,#0f172a,#2563eb)}.or{text-align:center;color:#94a3b8;font-size:12px;margin:8px 0}.plain{display:block;text-align:center;font-size:13px;margin-top:8px}</style></head><body><form class="card" method="post"><h2>devops-worker 管理员登录</h2><p>请选择 SSO 或本地管理员登录。</p>%s<input name="username" placeholder="管理员账号" required><input name="password" type="password" placeholder="管理员密码" required><button type="submit">登录</button><a class="plain" href="/">以普通用户进入</a></form></body></html>`, ssoButton)
+	_, _ = w.Write([]byte(page))
 }
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {

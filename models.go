@@ -1,17 +1,25 @@
 package main
 
 type Config struct {
-	BotToken        string
-	GroupChatIDs    []int64
-	GroupTopicMap   map[int64]int
-	ApproverUserIDs []int64
-	WebAddr         string
-	DataDir         string
-	Timezone        string
-	AdminUsername   string
-	AdminPassword   string
-	WorkOrderURL    string
-	DailyReportTime string
+	BotToken         string
+	GroupChatIDs     []int64
+	GroupTopicMap    map[int64]int
+	ApproverUserIDs  []int64
+	WebAddr          string
+	DataDir          string
+	Timezone         string
+	AdminUsername    string
+	AdminPassword    string
+	WorkOrderURL     string
+	DailyReportTime  string
+	SSOEnabled       bool
+	OIDCIssuerURL    string
+	OIDCClientID     string
+	OIDCClientSecret string
+	OIDCRedirectURL  string
+	OIDCScopes       string
+	SSOAdminUsers    []string
+	SSOAdminRoles    []string
 }
 
 type Shift struct {

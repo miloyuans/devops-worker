@@ -61,6 +61,46 @@ admin / change_me
 | `APP_TIMEZONE` | Telegram 定时提醒的默认时区，默认 `Asia/Dubai`。Web 页面右上角可单独下拉选择展示时区，默认也是 `Asia/Dubai`。 |
 | `ADMIN_USERNAME` | 管理员登录用户名。 |
 | `ADMIN_PASSWORD` | 管理员登录密码。 |
+| `SSO_ENABLED` | 是否启用 Keycloak/OIDC SSO，默认 false。 |
+| `OIDC_ISSUER_URL` | Keycloak realm issuer URL，例如 `https://keycloak.example.com/realms/devops`。 |
+| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | Keycloak OIDC Client 配置。 |
+| `OIDC_REDIRECT_URL` | 回调地址，例如 `https://dwork.abc.om/sso/callback`。 |
+| `SSO_ADMIN_USERS` | SSO 管理员用户白名单，逗号分隔。 |
+| `SSO_ADMIN_ROLES` | SSO 管理员角色白名单，逗号分隔。 |
+
+
+## Keycloak / OIDC SSO
+
+系统已支持通过 Keycloak 的 OIDC Authorization Code Flow 登录管理员账号。普通用户仍然无需密码即可查看默认排班和提交排班审批；只有命中 SSO 管理员用户或管理员角色的账号会被授予 `admin` 超级管理员权限。
+
+建议 Keycloak Client 设置：
+
+```text
+Client ID: devops-worker
+Access Type: confidential
+Valid Redirect URI: https://dwork.abc.om/sso/callback
+Web Origins: https://dwork.abc.om
+```
+
+环境变量示例：
+
+```bash
+SSO_ENABLED=true
+OIDC_ISSUER_URL=https://keycloak.example.com/realms/devops
+OIDC_CLIENT_ID=devops-worker
+OIDC_CLIENT_SECRET=replace_me
+OIDC_REDIRECT_URL=https://dwork.abc.om/sso/callback
+OIDC_SCOPES="openid profile email"
+SSO_ADMIN_USERS=admin@example.com,admin_username
+SSO_ADMIN_ROLES=devops-worker-admin,admin
+```
+
+权限判断规则：
+
+- `SSO_ADMIN_USERS` 可匹配 `sub`、`preferred_username`、`email`、`name`。
+- `SSO_ADMIN_ROLES` 可匹配 Keycloak token 中的 `roles`、`groups`、`realm_access.roles`、`resource_access.*.roles`。
+- 未命中管理员规则的 SSO 用户不会获得 admin 权限，会以普通用户身份进入。
+- 本地 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 登录仍然保留，便于 SSO 故障时兜底。
 
 ## Telegram 设置
 

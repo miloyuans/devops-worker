@@ -9,17 +9,25 @@ import (
 
 func loadConfig() Config {
 	cfg := Config{
-		BotToken:        strings.TrimSpace(os.Getenv("BOT_TOKEN")),
-		GroupTopicMap:   map[int64]int{},
-		WebAddr:         envOr("WEB_ADDR", ":8080"),
-		DataDir:         envOr("DATA_DIR", "./data"),
-		Timezone:        envOr("APP_TIMEZONE", DefaultShiftTimezone),
-		AdminUsername:   envOr("ADMIN_USERNAME", "admin"),
-		AdminPassword:   envOr("ADMIN_PASSWORD", "change_me"),
-		WorkOrderURL:    envFirst("WORK_ORDER_URL", "WEB_PUBLIC_URL", "PUBLIC_BASE_URL"),
-		DailyReportTime: envOr("DAILY_REPORT_TIME", "09:00"),
-		GroupChatIDs:    parseInt64List(os.Getenv("GROUP_CHAT_IDS")),
-		ApproverUserIDs: parseInt64List(os.Getenv("APPROVER_USER_IDS")),
+		BotToken:         strings.TrimSpace(os.Getenv("BOT_TOKEN")),
+		GroupTopicMap:    map[int64]int{},
+		WebAddr:          envOr("WEB_ADDR", ":8080"),
+		DataDir:          envOr("DATA_DIR", "./data"),
+		Timezone:         envOr("APP_TIMEZONE", DefaultShiftTimezone),
+		AdminUsername:    envOr("ADMIN_USERNAME", "admin"),
+		AdminPassword:    envOr("ADMIN_PASSWORD", "change_me"),
+		WorkOrderURL:     envFirst("WORK_ORDER_URL", "WEB_PUBLIC_URL", "PUBLIC_BASE_URL"),
+		DailyReportTime:  envOr("DAILY_REPORT_TIME", "09:00"),
+		SSOEnabled:       parseBoolEnv("SSO_ENABLED", false),
+		OIDCIssuerURL:    strings.TrimSpace(os.Getenv("OIDC_ISSUER_URL")),
+		OIDCClientID:     strings.TrimSpace(os.Getenv("OIDC_CLIENT_ID")),
+		OIDCClientSecret: strings.TrimSpace(os.Getenv("OIDC_CLIENT_SECRET")),
+		OIDCRedirectURL:  strings.TrimSpace(os.Getenv("OIDC_REDIRECT_URL")),
+		OIDCScopes:       envOr("OIDC_SCOPES", "openid profile email"),
+		SSOAdminUsers:    parseStringList(os.Getenv("SSO_ADMIN_USERS")),
+		SSOAdminRoles:    parseStringList(os.Getenv("SSO_ADMIN_ROLES")),
+		GroupChatIDs:     parseInt64List(os.Getenv("GROUP_CHAT_IDS")),
+		ApproverUserIDs:  parseInt64List(os.Getenv("APPROVER_USER_IDS")),
 	}
 
 	if topicStr := strings.TrimSpace(os.Getenv("GROUP_CHAT_TOPICS")); topicStr != "" {
@@ -77,4 +85,30 @@ func parseInt64List(s string) []int64 {
 		out = append(out, v)
 	}
 	return out
+}
+
+func parseStringList(s string) []string {
+	var out []string
+	for _, raw := range strings.Split(s, ",") {
+		raw = strings.TrimSpace(raw)
+		if raw != "" {
+			out = append(out, raw)
+		}
+	}
+	return out
+}
+
+func parseBoolEnv(key string, fallback bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "" {
+		return fallback
+	}
+	switch v {
+	case "1", "true", "yes", "on", "enabled":
+		return true
+	case "0", "false", "no", "off", "disabled":
+		return false
+	default:
+		return fallback
+	}
 }
