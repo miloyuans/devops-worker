@@ -85,7 +85,7 @@ Web Origins: https://dwork.abc.om
 环境变量示例：
 
 ```bash
-SSO_ENABLED=true
+SSO_ENABLED=false
 OIDC_ISSUER_URL=https://keycloak.example.com/realms/devops
 OIDC_CLIENT_ID=devops-worker
 OIDC_CLIENT_SECRET=replace_me

@@ -64,8 +64,9 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/approvals/approve", a.handleApprovalApprove)
 	mux.HandleFunc("/approvals/reject", a.handleApprovalReject)
 	mux.HandleFunc("/history", a.handleHistory)
-	mux.HandleFunc("/settings", a.handleSettings)
-	mux.HandleFunc("/settings/sso", a.handleSSOSettingsUpdate)
+	mux.HandleFunc("/settings", a.handleSettingsRedirect)
+	mux.HandleFunc("/sso-settings", a.handleSSOSettings)
+	mux.HandleFunc("/sso-settings/update", a.handleSSOSettingsUpdate)
 	mux.Handle("/previews/", http.StripPrefix("/previews/", http.FileServer(http.Dir(filepath.Join(a.Cfg.DataDir, "previews")))))
 	appMux.Handle("/", a.roleMiddleware(mux))
 	return appMux
@@ -703,14 +704,18 @@ func (a *App) handleApprovalReject(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/approvals", http.StatusSeeOther)
 }
 
-func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleSettingsRedirect(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/sso-settings", http.StatusSeeOther)
+}
+
+func (a *App) handleSSOSettings(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdmin(r) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
-	data := a.basePage(r, "系统设置")
+	data := a.basePage(r, "SSO 配置")
 	data.SSOSettings = a.effectiveSSOSettings()
-	a.render(w, "settings", data)
+	a.render(w, "sso_settings", data)
 }
 
 func (a *App) handleSSOSettingsUpdate(w http.ResponseWriter, r *http.Request) {
@@ -719,7 +724,7 @@ func (a *App) handleSSOSettingsUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Redirect(w, r, "/settings", http.StatusSeeOther)
+		http.Redirect(w, r, "/sso-settings", http.StatusSeeOther)
 		return
 	}
 	_ = r.ParseForm()
@@ -746,10 +751,10 @@ func (a *App) handleSSOSettingsUpdate(w http.ResponseWriter, r *http.Request) {
 		settings.UserRoles = []string{"devops-worker-user", "user"}
 	}
 	if err := a.Store.SaveSSOSettings(settings); err != nil {
-		a.renderError(w, "系统设置", "保存 SSO 设置失败: "+err.Error())
+		a.renderError(w, "SSO 配置", "保存 SSO 设置失败: "+err.Error())
 		return
 	}
-	http.Redirect(w, r, "/settings?saved=1", http.StatusSeeOther)
+	http.Redirect(w, r, "/sso-settings?saved=1", http.StatusSeeOther)
 }
 
 func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {

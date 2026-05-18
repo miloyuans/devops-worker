@@ -38,27 +38,12 @@ func (a *App) effectiveSSOSettings() SSOSettings {
 	if err != nil {
 		log.Printf("load sso settings failed: %v", err)
 	}
-	// Environment values remain a bootstrap fallback. UI settings take precedence once saved.
-	if strings.TrimSpace(settings.IssuerURL) == "" {
-		settings.IssuerURL = a.Cfg.OIDCIssuerURL
-	}
-	if strings.TrimSpace(settings.ClientID) == "" {
-		settings.ClientID = a.effectiveSSOSettings().ClientID
-	}
-	if strings.TrimSpace(settings.ClientSecret) == "" {
-		settings.ClientSecret = a.effectiveSSOSettings().ClientSecret
-	}
-	if strings.TrimSpace(settings.RedirectURL) == "" {
-		settings.RedirectURL = a.effectiveSSOSettings().RedirectURL
-	}
+	// UI settings are authoritative. SSO is disabled by default until an admin enables it in /sso-settings.
 	if strings.TrimSpace(settings.Scopes) == "" {
-		settings.Scopes = a.effectiveSSOSettings().Scopes
-	}
-	if len(settings.AdminUsers) == 0 {
-		settings.AdminUsers = a.Cfg.SSOAdminUsers
+		settings.Scopes = "openid profile email"
 	}
 	if len(settings.AdminRoles) == 0 {
-		settings.AdminRoles = a.Cfg.SSOAdminRoles
+		settings.AdminRoles = []string{"devops-worker-admin", "admin"}
 	}
 	if len(settings.UserRoles) == 0 {
 		settings.UserRoles = []string{"devops-worker-user", "user"}

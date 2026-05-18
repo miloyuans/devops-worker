@@ -19,7 +19,6 @@ func main() {
 	if err := store.Init(); err != nil {
 		log.Fatalf("初始化数据目录失败: %v", err)
 	}
-	bootstrapSSOSettingsFromEnv(store, cfg)
 	if summary, err := store.RepairActiveSchedule(loc); err != nil {
 		log.Printf("repair active schedule failed: %v", err)
 	} else if summary.ChangedItems > 0 {
@@ -68,31 +67,5 @@ func startScheduleConsistencyScheduler(store *Storage, loc *time.Location, tg *T
 	defer ticker.Stop()
 	for range ticker.C {
 		run()
-	}
-}
-
-func bootstrapSSOSettingsFromEnv(store *Storage, cfg Config) {
-	if store == nil || !cfg.SSOEnabled {
-		return
-	}
-	settings, err := store.LoadSSOSettings()
-	if err != nil {
-		log.Printf("load sso settings for bootstrap failed: %v", err)
-		return
-	}
-	if settings.Enabled || settings.IssuerURL != "" || settings.ClientID != "" || settings.RedirectURL != "" {
-		return
-	}
-	settings.Enabled = true
-	settings.IssuerURL = cfg.OIDCIssuerURL
-	settings.ClientID = cfg.OIDCClientID
-	settings.ClientSecret = cfg.OIDCClientSecret
-	settings.RedirectURL = cfg.OIDCRedirectURL
-	settings.Scopes = cfg.OIDCScopes
-	settings.AdminUsers = cfg.SSOAdminUsers
-	settings.AdminRoles = cfg.SSOAdminRoles
-	settings.UserRoles = []string{"devops-worker-user", "user"}
-	if err := store.SaveSSOSettings(settings); err != nil {
-		log.Printf("bootstrap sso settings from env failed: %v", err)
 	}
 }
