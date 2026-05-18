@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -110,6 +111,7 @@ func (t *TelegramService) StartPollingAndScheduler() {
 	_ = lockFile
 	log.Printf("bot lock acquired; starting getUpdates and scheduler")
 	go t.startScheduler()
+	go t.startDailyScheduleReportScheduler()
 	go t.pollUpdates()
 }
 
@@ -528,6 +530,239 @@ func (t *TelegramService) handleText(msg *telegramMessage) {
 		b.WriteString(fmt.Sprintf("• %s %s %s-%s\n", html.EscapeString(item.StaffName), html.EscapeString(item.ShiftName), html.EscapeString(formatClock(item.StartTime)), html.EscapeString(formatClock(item.EndTime))))
 	}
 	_ = t.sendMessage(msg.Chat.ID, threadID, b.String(), "HTML")
+}
+
+func (t *TelegramService) startDailyScheduleReportScheduler() {
+	if t == nil || t.Store == nil {
+		return
+	}
+	for {
+		wait := t.maybeSendDailyScheduleReport()
+		if wait < time.Second {
+			wait = time.Minute
+		}
+		time.Sleep(wait)
+	}
+}
+
+func (t *TelegramService) maybeSendDailyScheduleReport() time.Duration {
+	if t == nil || t.Store == nil || len(t.Cfg.GroupChatIDs) == 0 {
+		return 30 * time.Minute
+	}
+	now := time.Now().In(t.Loc)
+	reportAt := dailyReportTimeForDate(now, t.Cfg.DailyReportTime, t.Loc)
+	if now.Before(reportAt) {
+		return time.Until(reportAt)
+	}
+
+	date := now.Format("2006-01-02")
+	items, err := t.Store.LoadDay(date)
+	if err != nil {
+		log.Printf("daily schedule report load day failed date=%s: %v", date, err)
+		return 300 * time.Second
+	}
+	statuses := t.Store.BuildScheduleItemStatuses(items, t.Loc)
+	messages := t.buildDailyScheduleReportMessages(date, statuses)
+	if len(messages) == 0 {
+		messages = []string{fmt.Sprintf("📋 <b>%s 排班明细</b>\n\n今日无排班。", html.EscapeString(date))}
+	}
+
+	allSent := true
+	for _, chatID := range t.Cfg.GroupChatIDs {
+		if chatID == 0 {
+			continue
+		}
+		if t.Store.DailyReportAlreadySent(date, chatID) {
+			continue
+		}
+		threadID := t.getThreadID(chatID, 0)
+		chatSent := true
+		for i, msg := range messages {
+			if err := t.sendMessage(chatID, threadID, msg, "HTML"); err != nil {
+				chatSent = false
+				allSent = false
+				log.Printf("send daily schedule report failed chat=%d part=%d/%d date=%s: %v", chatID, i+1, len(messages), date, err)
+				break
+			}
+		}
+		if chatSent {
+			if err := t.Store.RecordDailyReportSent(date, chatID, time.Now()); err != nil {
+				allSent = false
+				log.Printf("record daily schedule report sent failed chat=%d date=%s: %v", chatID, date, err)
+			}
+		}
+	}
+	if !allSent {
+		return 300 * time.Second
+	}
+	return time.Until(dailyReportTimeForDate(now.AddDate(0, 0, 1), t.Cfg.DailyReportTime, t.Loc))
+}
+
+func dailyReportTimeForDate(day time.Time, clock string, loc *time.Location) time.Time {
+	if loc == nil {
+		loc = time.Local
+	}
+	hour, min := 9, 0
+	if h, m, err := parseDailyReportClock(clock); err == nil {
+		hour, min = h, m
+	}
+	d := day.In(loc)
+	return time.Date(d.Year(), d.Month(), d.Day(), hour, min, 0, 0, loc)
+}
+
+func parseDailyReportClock(clock string) (int, int, error) {
+	parts := strings.Split(strings.TrimSpace(clock), ":")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("invalid daily report time")
+	}
+	h, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, err
+	}
+	m, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, err
+	}
+	if h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, 0, fmt.Errorf("invalid daily report time range")
+	}
+	return h, m, nil
+}
+
+type dailyScheduleGroup struct {
+	Code  string
+	Name  string
+	Start string
+	End   string
+	Rank  int
+	Items []ScheduleItemStatus
+}
+
+func (t *TelegramService) buildDailyScheduleReportMessages(date string, statuses []ScheduleItemStatus) []string {
+	sort.Slice(statuses, func(i, j int) bool {
+		ri, rj := scheduleStatusRank(statuses[i]), scheduleStatusRank(statuses[j])
+		if ri != rj {
+			return ri < rj
+		}
+		if statuses[i].ShiftName != statuses[j].ShiftName {
+			return statuses[i].ShiftName < statuses[j].ShiftName
+		}
+		return statuses[i].StaffName < statuses[j].StaffName
+	})
+
+	groupsByCode := map[string]*dailyScheduleGroup{}
+	var groups []*dailyScheduleGroup
+	for _, st := range statuses {
+		code := strings.TrimSpace(st.ShiftCode)
+		if code == "" {
+			code = st.ShiftName
+		}
+		g := groupsByCode[code]
+		if g == nil {
+			g = &dailyScheduleGroup{Code: code, Name: st.ShiftName, Start: st.StartClock, End: st.EndClock, Rank: scheduleStatusRank(st)}
+			groupsByCode[code] = g
+			groups = append(groups, g)
+		}
+		g.Items = append(g.Items, st)
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].Rank != groups[j].Rank {
+			return groups[i].Rank < groups[j].Rank
+		}
+		return groups[i].Name < groups[j].Name
+	})
+
+	header := fmt.Sprintf("📋 <b>%s 排班明细</b>\n<code>自动日报 %s</code>\n", html.EscapeString(date), html.EscapeString(strings.TrimSpace(t.Cfg.DailyReportTime)))
+	if strings.TrimSpace(t.Cfg.WorkOrderURL) != "" {
+		header += fmt.Sprintf("工单: %s\n", html.EscapeString(strings.TrimSpace(t.Cfg.WorkOrderURL)))
+	}
+
+	var messages []string
+	current := header
+	appendChunk := func() {
+		if strings.TrimSpace(current) != "" {
+			messages = append(messages, current)
+		}
+		current = header
+	}
+	for _, g := range groups {
+		section := t.renderDailyScheduleGroup(g)
+		if len([]rune(current))+len([]rune(section)) > 3600 && current != header {
+			appendChunk()
+		}
+		if len([]rune(section)) > 3400 {
+			lines := strings.Split(section, "\n")
+			for _, line := range lines {
+				if len([]rune(current))+len([]rune(line))+1 > 3600 && current != header {
+					appendChunk()
+				}
+				current += line + "\n"
+			}
+			continue
+		}
+		current += section + "\n"
+	}
+	if current != header || len(messages) == 0 {
+		messages = append(messages, current)
+	}
+	if len(messages) > 1 {
+		for i := range messages {
+			messages[i] += fmt.Sprintf("\n<code>第 %d/%d 段</code>", i+1, len(messages))
+		}
+	}
+	return messages
+}
+
+func (t *TelegramService) renderDailyScheduleGroup(g *dailyScheduleGroup) string {
+	name := g.Name
+	if strings.TrimSpace(name) == "" {
+		name = g.Code
+	}
+	timePart := ""
+	if g.Start != "" || g.End != "" {
+		timePart = fmt.Sprintf("  <code>%s - %s</code>", html.EscapeString(g.Start), html.EscapeString(g.End))
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("\n<b>【%s】</b>%s  <code>%d人</code>\n", html.EscapeString(name), timePart, len(g.Items)))
+	for _, st := range g.Items {
+		tg := "未绑"
+		if st.TelegramUserID > 0 {
+			tg = "TG"
+		}
+		phone := ""
+		if strings.TrimSpace(st.StaffPhone) != "" {
+			phone = " ｜ ☎ " + html.EscapeString(strings.TrimSpace(st.StaffPhone))
+		}
+		b.WriteString(fmt.Sprintf("• <b>%s</b>%s ｜ %s ｜ %s ｜ %s\n", html.EscapeString(st.StaffName), phone, html.EscapeString(st.NotifyStatusLabel), html.EscapeString(st.ReadStatusLabel), html.EscapeString(tg)))
+	}
+	return b.String()
+}
+
+func scheduleStatusRank(st ScheduleItemStatus) int {
+	return shiftGroupRank(st.ShiftCode, st.ShiftName, st.ShiftShortName)
+}
+
+func shiftGroupRank(code, name, short string) int {
+	c := strings.ToLower(strings.TrimSpace(code))
+	joined := name + short
+	switch {
+	case c == "morning" || strings.Contains(joined, "早"):
+		return 10
+	case c == "middle" || strings.Contains(joined, "中"):
+		return 20
+	case c == "night" || strings.Contains(joined, "晚") || strings.Contains(joined, "夜"):
+		return 30
+	case c == "normal" || strings.Contains(joined, "正常"):
+		return 40
+	case c == "rest" || strings.Contains(joined, "休"):
+		return 50
+	case c == "annual_leave" || strings.Contains(joined, "年"):
+		return 60
+	case c == "sick_leave" || strings.Contains(joined, "病"):
+		return 70
+	default:
+		return 99
+	}
 }
 
 func (t *TelegramService) startScheduler() {

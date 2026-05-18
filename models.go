@@ -11,6 +11,7 @@ type Config struct {
 	AdminUsername   string
 	AdminPassword   string
 	WorkOrderURL    string
+	DailyReportTime string
 }
 
 type Shift struct {
@@ -166,6 +167,12 @@ type NotificationTaskState struct {
 
 type ReminderState struct {
 	Sent map[string]bool `json:"sent"`
+}
+
+// DailyReportState stores per-day/per-chat delivery state for the automatic
+// daily schedule summary, so pod restarts do not duplicate the 09:00 report.
+type DailyReportState struct {
+	Sent map[string]string `json:"sent"` // key: YYYY-MM-DD|chatID, value: RFC3339 sent time
 }
 
 type CalendarDay struct {

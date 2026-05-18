@@ -49,6 +49,9 @@ func (s *Storage) Init() error {
 	if err := s.ensureDefaultNotificationTaskState(); err != nil {
 		return err
 	}
+	if err := s.ensureDefaultDailyReportState(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -168,6 +171,14 @@ func (s *Storage) ensureDefaultNotificationTaskState() error {
 		return nil
 	}
 	return writeJSONAtomic(path, NotificationTaskState{Tasks: []NotificationTask{}})
+}
+
+func (s *Storage) ensureDefaultDailyReportState() error {
+	path := filepath.Join(s.Dir, "meta", "daily_reports.json")
+	if fileExists(path) {
+		return nil
+	}
+	return writeJSONAtomic(path, DailyReportState{Sent: map[string]string{}})
 }
 
 func (s *Storage) WithLock(fn func() error) error {
@@ -545,6 +556,36 @@ func (s *Storage) MarkReminderIfNeeded(key string) (bool, error) {
 		return writeJSONAtomic(path, state)
 	})
 	return shouldSend, err
+}
+
+func dailyReportKey(date string, chatID int64) string {
+	return fmt.Sprintf("%s|%d", date, chatID)
+}
+
+func (s *Storage) DailyReportAlreadySent(date string, chatID int64) bool {
+	state := DailyReportState{Sent: map[string]string{}}
+	path := filepath.Join(s.Dir, "meta", "daily_reports.json")
+	_ = readJSON(path, &state)
+	if state.Sent == nil {
+		return false
+	}
+	return state.Sent[dailyReportKey(date, chatID)] != ""
+}
+
+func (s *Storage) RecordDailyReportSent(date string, chatID int64, sentAt time.Time) error {
+	return s.WithLock(func() error {
+		path := filepath.Join(s.Dir, "meta", "daily_reports.json")
+		state := DailyReportState{Sent: map[string]string{}}
+		_ = readJSON(path, &state)
+		if state.Sent == nil {
+			state.Sent = map[string]string{}
+		}
+		key := dailyReportKey(date, chatID)
+		if state.Sent[key] == "" {
+			state.Sent[key] = sentAt.Format(time.RFC3339)
+		}
+		return writeJSONAtomic(path, state)
+	})
 }
 
 func (s *Storage) LoadNotifications() (NotificationState, error) {

@@ -15,6 +15,7 @@
 - 审批通过后才原子更新正式排班，并写入历史快照。审批不再强依赖提交时版本号，而是使用唯一事务 ID；确认审批时会基于当时最新正式排班合并变更。
 - 审批拒绝不会更新正式排班。
 - 工作提醒改为持久化通知任务队列：排班生效后自动生成通知任务，任务在班次开始前 30 分钟进入可消费状态，消费成功后才标记已通知；失败任务每 300 秒重试，避免错过精确分钟导致漏提醒。
+- 每天 09:00 会自动向配置群发送当天排班明细日报，按早/中/晚/正常/休/年/病等班次分组，内容与首页排班明细保持一致。
 - Web 的“已读”状态来自值班人员点击“我已读”按钮；Telegram 不提供普通群消息真实阅读回执。
 - 通过文件锁和原子写入降低 Pod 滚动更新时的数据污染风险。
 
@@ -55,6 +56,7 @@ admin / change_me
 | `APPROVER_USER_IDS` | 指定审批人的 Telegram user ID，逗号分隔。只有这些用户点同意/拒绝才有效。 |
 | `WEB_ADDR` | Web 监听地址，默认 `:8080`。 |
 | `WORK_ORDER_URL` | Telegram 工作提醒里展示的排班工单/Web 页面地址，可为空；工作提醒会同时展示用户电话资料（如已填写）。 |
+| `DAILY_REPORT_TIME` | 每日排班明细自动发送时间，默认 `09:00`，使用 `APP_TIMEZONE` 时区。 |
 | `DATA_DIR` | 数据目录，默认 `./data`。容器部署时必须挂载持久卷。 |
 | `APP_TIMEZONE` | Telegram 定时提醒的默认时区，默认 `Asia/Dubai`。Web 页面右上角可单独下拉选择展示时区，默认也是 `Asia/Dubai`。 |
 | `ADMIN_USERNAME` | 管理员登录用户名。 |
@@ -146,6 +148,16 @@ data/config/shifts.json
 
 注意：Telegram Bot API 不提供普通群消息真实阅读回执，因此这里的“已读”是业务确认状态，不是 Telegram 客户端阅读回执。
 
+
+## 每日排班明细日报
+
+- 默认每天 `09:00` 按 `APP_TIMEZONE` 时区向 `GROUP_CHAT_IDS` 配置的群发送当天排班明细。
+- 可通过 `DAILY_REPORT_TIME=09:00` 调整发送时间。
+- 日报按班次分组，分组顺序为：早班、中班、晚班、正常班、休息、年假、病假、自定义班次。
+- 每个班次分组会显示班次时间、人数，以及每个用户的通知状态、已读状态、TG 绑定状态和电话资料。
+- 发送状态记录在 `data/meta/daily_reports.json`，Pod 重启不会重复发送当天已成功发送的日报。
+- 如果 Telegram 发送失败，该群当天日报不会标记成功，系统会每 300 秒重试。
+
 ## 数据目录
 
 ```text
@@ -161,7 +173,8 @@ data/
 ├── history/YYYY/MM/YYYY-MM-DD.json
 ├── locks/*.lock
 ├── meta/notification_tasks.json
-└── meta/notifications.json
+├── meta/notifications.json
+└── meta/daily_reports.json
 ```
 
 旧版本的 `meta/reminders.json` 仍会初始化保留；新版本提醒触发主要使用 `meta/notification_tasks.json` 作为任务队列，通知成功结果写入 `meta/notifications.json`。

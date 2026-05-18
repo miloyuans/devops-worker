@@ -17,6 +17,7 @@ func loadConfig() Config {
 		AdminUsername:   envOr("ADMIN_USERNAME", "admin"),
 		AdminPassword:   envOr("ADMIN_PASSWORD", "change_me"),
 		WorkOrderURL:    envFirst("WORK_ORDER_URL", "WEB_PUBLIC_URL", "PUBLIC_BASE_URL"),
+		DailyReportTime: envOr("DAILY_REPORT_TIME", "09:00"),
 		GroupChatIDs:    parseInt64List(os.Getenv("GROUP_CHAT_IDS")),
 		ApproverUserIDs: parseInt64List(os.Getenv("APPROVER_USER_IDS")),
 	}
