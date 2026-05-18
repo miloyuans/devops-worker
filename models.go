@@ -55,10 +55,16 @@ type ShiftConfig struct {
 type StaffUser struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
+	Email          string `json:"email,omitempty"`
 	Phone          string `json:"phone,omitempty"`
 	TelegramUserID int64  `json:"telegram_user_id"`
 	Enabled        bool   `json:"enabled"`
-	CreatedBy      string `json:"created_by,omitempty"` // admin/user，用于 Web 权限隔离
+	CreatedBy      string `json:"created_by,omitempty"` // admin/user/sso，用于 Web 权限隔离
+	SSOProvider    string `json:"sso_provider,omitempty"`
+	SSOSub         string `json:"sso_sub,omitempty"`
+	SSOUsername    string `json:"sso_username,omitempty"`
+	SSOEmail       string `json:"sso_email,omitempty"`
+	LastSSOLoginAt string `json:"last_sso_login_at,omitempty"`
 	CreatedAt      string `json:"created_at"`
 	UpdatedAt      string `json:"updated_at"`
 }
@@ -224,6 +230,10 @@ type PageData struct {
 	Title             string
 	Role              string
 	IsAdmin           bool
+	IsAuthenticated   bool
+	CurrentUserName   string
+	CurrentUserEmail  string
+	CurrentUserSource string
 	Config            Config
 	Active            ActiveSchedule
 	Users             []StaffUser

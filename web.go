@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -27,7 +28,93 @@ type App struct {
 type contextKey string
 
 const roleContextKey contextKey = "role"
+const identityContextKey contextKey = "identity"
 const adminCookieName = "devops_worker_admin"
+
+type AuthIdentity struct {
+	Name     string `json:"name"`
+	Email    string `json:"email,omitempty"`
+	Role     string `json:"role"`
+	Source   string `json:"source"`
+	StaffID  string `json:"staff_id,omitempty"`
+	Username string `json:"username,omitempty"`
+	Exp      int64  `json:"exp"`
+}
+
+func (a *App) signIdentitySession(identity AuthIdentity) string {
+	if identity.Exp == 0 {
+		identity.Exp = time.Now().Add(12 * time.Hour).Unix()
+	}
+	if strings.TrimSpace(identity.Name) == "" {
+		identity.Name = identity.Role
+	}
+	payload, _ := json.Marshal(identity)
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
+	mac := hmac.New(sha256.New, []byte(a.Cfg.AdminPassword))
+	_, _ = mac.Write([]byte(payloadB64))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return payloadB64 + "." + sig
+}
+
+func (a *App) parseIdentitySession(v string) (AuthIdentity, bool) {
+	if strings.TrimSpace(v) == "" {
+		return AuthIdentity{}, false
+	}
+	// Current signed JSON format: base64(json).hmac
+	if strings.Contains(v, ".") {
+		parts := strings.SplitN(v, ".", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return AuthIdentity{}, false
+		}
+		mac := hmac.New(sha256.New, []byte(a.Cfg.AdminPassword))
+		_, _ = mac.Write([]byte(parts[0]))
+		expected := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+		if !hmac.Equal([]byte(parts[1]), []byte(expected)) {
+			return AuthIdentity{}, false
+		}
+		payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+		if err != nil {
+			return AuthIdentity{}, false
+		}
+		var identity AuthIdentity
+		if err := json.Unmarshal(payload, &identity); err != nil {
+			return AuthIdentity{}, false
+		}
+		if identity.Exp != 0 && time.Now().Unix() > identity.Exp {
+			return AuthIdentity{}, false
+		}
+		if strings.TrimSpace(identity.Name) == "" {
+			identity.Name = identity.Role
+		}
+		return identity, true
+	}
+	// Backward compatibility with the old simple SSO user cookie: base64("username:exp").
+	decoded, err := base64.RawURLEncoding.DecodeString(v)
+	if err != nil {
+		return AuthIdentity{}, false
+	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 {
+		return AuthIdentity{}, false
+	}
+	exp, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || time.Now().Unix() > exp {
+		return AuthIdentity{}, false
+	}
+	return AuthIdentity{Name: parts[0], Role: "user", Source: "sso", Exp: exp}, true
+}
+
+func (a *App) requestIdentity(r *http.Request) (AuthIdentity, bool) {
+	if c, err := r.Cookie(ssoUserCookieName); err == nil && c.Value != "" {
+		if identity, ok := a.parseIdentitySession(c.Value); ok {
+			return identity, true
+		}
+	}
+	if a.isAdmin(r) {
+		return AuthIdentity{Name: a.Cfg.AdminUsername, Role: "admin", Source: "local"}, true
+	}
+	return AuthIdentity{Name: "普通用户", Role: "user", Source: "anonymous"}, false
+}
 
 func setNoStoreHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
@@ -75,14 +162,26 @@ func (a *App) routes() http.Handler {
 func (a *App) roleMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setNoStoreHeaders(w)
+		identity, authenticated := a.requestIdentity(r)
+		if a.ssoEnabled() && !authenticated {
+			// SSO 开启后不再允许匿名浏览业务页面，统一进入登录入口。
+			http.Redirect(w, r, "/login?next="+urlQueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
+			return
+		}
 		role := "user"
-		if a.isAdmin(r) {
+		if a.isAdmin(r) || identity.Role == "admin" {
 			role = "admin"
+			identity.Role = "admin"
+		} else {
+			identity.Role = "user"
 		}
 		ctx := context.WithValue(r.Context(), roleContextKey, role)
+		ctx = context.WithValue(ctx, identityContextKey, identity)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
+
+func urlQueryEscape(v string) string { return url.QueryEscape(v) }
 
 func (a *App) role(r *http.Request) string {
 	if v, ok := r.Context().Value(roleContextKey).(string); ok && v != "" {
@@ -92,6 +191,13 @@ func (a *App) role(r *http.Request) string {
 		return "admin"
 	}
 	return "user"
+}
+
+func (a *App) identity(r *http.Request) (AuthIdentity, bool) {
+	if v, ok := r.Context().Value(identityContextKey).(AuthIdentity); ok {
+		return v, v.Source != "anonymous"
+	}
+	return a.requestIdentity(r)
 }
 
 func (a *App) isAdmin(r *http.Request) bool {
@@ -127,9 +233,15 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	setNoStoreHeaders(w)
 	if r.Method == http.MethodPost {
 		_ = r.ParseForm()
+		if a.ssoEnabled() && r.URL.Query().Get("local") != "1" {
+			http.Redirect(w, r, "/sso/login", http.StatusSeeOther)
+			return
+		}
 		if r.FormValue("username") == a.Cfg.AdminUsername && r.FormValue("password") == a.Cfg.AdminPassword {
 			exp := time.Now().Add(12 * time.Hour)
 			http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: a.signAdminSession(exp.Unix()), Path: "/", Expires: exp, MaxAge: int(12 * time.Hour / time.Second), HttpOnly: true, SameSite: http.SameSiteLaxMode})
+			identity := AuthIdentity{Name: a.Cfg.AdminUsername, Role: "admin", Source: "local", Exp: exp.Unix()}
+			http.SetCookie(w, &http.Cookie{Name: ssoUserCookieName, Value: a.signIdentitySession(identity), Path: "/", Expires: exp, MaxAge: int(12 * time.Hour / time.Second), HttpOnly: true, SameSite: http.SameSiteLaxMode})
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
 		}
@@ -138,11 +250,23 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if a.ssoEnabled() {
+		page := `<html><head><meta charset="utf-8"><title>SSO Login</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;background:#eef6ff;display:grid;place-items:center;height:100vh;margin:0}.card{background:white;border:1px solid #dbe4ef;border-radius:18px;padding:24px;box-shadow:0 20px 50px rgba(15,23,42,.12);width:360px}h2{margin:0 0 10px}p{color:#64748b;font-size:13px}.sso{display:block;width:100%;box-sizing:border-box;padding:11px;margin:12px 0;border-radius:10px;border:1px solid #dbe4ef;text-align:center;background:linear-gradient(135deg,#0f172a,#2563eb);color:#fff;font-weight:700;text-decoration:none}.plain{display:block;text-align:center;font-size:12px;margin-top:10px;color:#64748b}</style></head><body><div class="card"><h2>devops-worker 登录</h2><p>当前已启用 SSO，请通过统一身份认证后访问系统。</p><a class="sso" href="/sso/login">使用 Keycloak SSO 登录</a><a class="plain" href="/login?local=1">本地管理员备用入口</a></div></body></html>`
+		if r.URL.Query().Get("local") != "1" {
+			_, _ = w.Write([]byte(page))
+			return
+		}
+	}
 	ssoButton := ""
 	if a.ssoEnabled() {
-		ssoButton = `<a class="sso" href="/sso/login">使用 Keycloak SSO 登录</a><div class="or">或使用本地管理员密码</div>`
+		ssoButton = `<a class="sso" href="/sso/login">使用 Keycloak SSO 登录</a><div class="or">本地管理员备用登录</div>`
 	}
-	page := fmt.Sprintf(`<html><head><meta charset="utf-8"><title>Admin Login</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;background:#eef6ff;display:grid;place-items:center;height:100vh;margin:0}.card{background:white;border:1px solid #dbe4ef;border-radius:18px;padding:24px;box-shadow:0 20px 50px rgba(15,23,42,.12);width:360px}h2{margin:0 0 10px}p{color:#64748b;font-size:13px}input,button,.sso{width:100%%;box-sizing:border-box;padding:10px;margin:8px 0;border-radius:10px;border:1px solid #dbe4ef}button,.sso{display:block;text-align:center;background:#2563eb;color:#fff;font-weight:700;cursor:pointer;text-decoration:none}.sso{background:linear-gradient(135deg,#0f172a,#2563eb)}.or{text-align:center;color:#94a3b8;font-size:12px;margin:8px 0}.plain{display:block;text-align:center;font-size:13px;margin-top:8px}</style></head><body><form class="card" method="post"><h2>devops-worker 管理员登录</h2><p>请选择 SSO 或本地管理员登录。</p>%s<input name="username" placeholder="管理员账号" required><input name="password" type="password" placeholder="管理员密码" required><button type="submit">登录</button><a class="plain" href="/">以普通用户进入</a></form></body></html>`, ssoButton)
+	page := fmt.Sprintf(`<html><head><meta charset="utf-8"><title>Admin Login</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial;background:#eef6ff;display:grid;place-items:center;height:100vh;margin:0}.card{background:white;border:1px solid #dbe4ef;border-radius:18px;padding:24px;box-shadow:0 20px 50px rgba(15,23,42,.12);width:360px}h2{margin:0 0 10px}p{color:#64748b;font-size:13px}input,button,.sso{width:100%%;box-sizing:border-box;padding:10px;margin:8px 0;border-radius:10px;border:1px solid #dbe4ef}button,.sso{display:block;text-align:center;background:#2563eb;color:#fff;font-weight:700;cursor:pointer;text-decoration:none}.sso{background:linear-gradient(135deg,#0f172a,#2563eb)}.or{text-align:center;color:#94a3b8;font-size:12px;margin:8px 0}.plain{display:block;text-align:center;font-size:13px;margin-top:8px}</style></head><body><form class="card" method="post"><h2>devops-worker 管理员登录</h2><p>请选择 SSO 或本地管理员登录。</p>%s<input name="username" placeholder="管理员账号" required><input name="password" type="password" placeholder="管理员密码" required><button type="submit">登录</button>{{ANON_LINK}}</form></body></html>`, ssoButton)
+	if a.ssoEnabled() {
+		page = strings.ReplaceAll(page, "{{ANON_LINK}}", "")
+	} else {
+		page = strings.ReplaceAll(page, "{{ANON_LINK}}", `<a class="plain" href="/">以普通用户进入</a>`)
+	}
 	_, _ = w.Write([]byte(page))
 }
 
@@ -150,6 +274,10 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	setNoStoreHeaders(w)
 	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	http.SetCookie(w, &http.Cookie{Name: ssoUserCookieName, Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	if a.ssoEnabled() {
+		http.Redirect(w, r, "/login?logout=1", http.StatusSeeOther)
+		return
+	}
 	http.Redirect(w, r, "/?logout=1", http.StatusSeeOther)
 }
 
@@ -200,18 +328,23 @@ func (a *App) basePage(r *http.Request, title string) PageData {
 	cfg := a.Cfg
 	cfg.Timezone = tz
 	role := a.role(r)
+	identity, authenticated := a.identity(r)
 	return PageData{
-		Title:           title,
-		Role:            role,
-		IsAdmin:         role == "admin",
-		Config:          cfg,
-		NowYear:         now.Year(),
-		NowMonth:        int(now.Month()),
-		NowDate:         now.Format("2006-01-02"),
-		Months:          []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
-		WeekNums:        []int{1, 2, 3, 4, 5},
-		TimeOptions:     buildTimeOptions(),
-		TimezoneOptions: buildTimezoneOptions(),
+		Title:             title,
+		Role:              role,
+		IsAdmin:           role == "admin",
+		IsAuthenticated:   authenticated,
+		CurrentUserName:   identity.Name,
+		CurrentUserEmail:  identity.Email,
+		CurrentUserSource: identity.Source,
+		Config:            cfg,
+		NowYear:           now.Year(),
+		NowMonth:          int(now.Month()),
+		NowDate:           now.Format("2006-01-02"),
+		Months:            []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
+		WeekNums:          []int{1, 2, 3, 4, 5},
+		TimeOptions:       buildTimeOptions(),
+		TimezoneOptions:   buildTimezoneOptions(),
 	}
 }
 
@@ -283,11 +416,12 @@ func (a *App) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/users", http.StatusSeeOther)
 		return
 	}
+	email := strings.TrimSpace(r.FormValue("email"))
 	phone := strings.TrimSpace(r.FormValue("phone"))
 	tgID := parseFormInt64(r.FormValue("telegram_user_id"))
 	users, _ := a.Store.LoadUsers()
 	now := time.Now().Format(time.RFC3339)
-	users = append(users, StaffUser{ID: newID("user"), Name: name, Phone: phone, TelegramUserID: tgID, Enabled: true, CreatedBy: a.role(r), CreatedAt: now, UpdatedAt: now})
+	users = append(users, StaffUser{ID: newID("user"), Name: name, Email: email, Phone: phone, TelegramUserID: tgID, Enabled: true, CreatedBy: a.role(r), CreatedAt: now, UpdatedAt: now})
 	if err := a.Store.SaveUsers(users); err != nil {
 		log.Printf("save user error: %v", err)
 	}
@@ -311,6 +445,7 @@ func (a *App) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 			}
 			wasEnabled := users[i].Enabled
 			users[i].Name = strings.TrimSpace(r.FormValue("name"))
+			users[i].Email = strings.TrimSpace(r.FormValue("email"))
 			users[i].Phone = strings.TrimSpace(r.FormValue("phone"))
 			users[i].TelegramUserID = parseFormInt64(r.FormValue("telegram_user_id"))
 			users[i].Enabled = r.FormValue("enabled") == "true"

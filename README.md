@@ -272,3 +272,25 @@ volumeMounts:
 - 只有通过 `/login` 登录的 admin 超级管理员可以点击“通过生效”或“拒绝”。
 - Web UI 审批通过后会立即合并到最新正式排班并生效，同时刷新通知任务队列。
 - 如果该审批曾发送 Telegram 审批窗口，Web UI 审批完成后也会同步更新 Telegram 消息状态。
+
+## SSO 用户信息展示
+
+SSO 登录成功后，页面右上角会自动展示 Keycloak/OIDC 返回的用户信息：
+
+- 优先展示 `name`
+- 如果没有 `name`，依次使用 `given_name + family_name`、`preferred_username`、`email`、`sub`
+- 如果返回了 `email`，会在角色标签下方附带展示
+- 普通 SSO 用户显示为“普通用户”，超级管理员显示为“超级管理员”
+
+本地 admin 登录仍显示本地管理员账号。退出会同时清理本地 admin 会话和 SSO 用户会话。
+
+## 本次版本补充：SSO 强制登录与系统用户自动关联
+
+- 当 SSO 配置在 `/sso-settings` 中启用后，业务页面不再允许匿名访问；未登录用户访问 `/`、`/schedule`、`/users`、`/approvals`、`/history` 等页面会自动跳转到 `/login`。
+- `/login` 会显示 Keycloak SSO 登录入口；本地管理员登录保留为备用入口 `/login?local=1`。
+- SSO 登录成功后，系统会自动根据 Keycloak claims 关联或创建系统用户：
+  1. 优先按 `sub` 匹配 `sso_sub`；
+  2. 其次按 `email` 匹配用户邮箱或历史 SSO 邮箱；
+  3. 再按 `preferred_username` 或显示名匹配系统用户名；
+  4. 如果找不到，则自动创建一个 `created_by=sso` 的启用用户。
+- 系统用户会记录 `email`、`sso_provider`、`sso_sub`、`sso_username`、`sso_email`、`last_sso_login_at`，方便后续审计和排班人员数据关联。

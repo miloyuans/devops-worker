@@ -164,20 +164,137 @@ func (a *App) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.oidcClaimsAreAdmin(claims) {
 		exp := time.Now().Add(12 * time.Hour)
+		identity := identityFromOIDCClaims(claims, "admin", exp.Unix())
+		if staff, err := a.syncSSOStaffUser(claims, identity); err == nil {
+			identity.StaffID = staff.ID
+			if strings.TrimSpace(staff.Name) != "" {
+				identity.Name = staff.Name
+			}
+		} else {
+			log.Printf("sync SSO staff user warning: %v", err)
+		}
 		http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: a.signAdminSession(exp.Unix()), Path: "/", Expires: exp, MaxAge: int(12 * time.Hour / time.Second), HttpOnly: true, SameSite: http.SameSiteLaxMode})
-		http.SetCookie(w, &http.Cookie{Name: ssoUserCookieName, Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+		http.SetCookie(w, &http.Cookie{Name: ssoUserCookieName, Value: a.signIdentitySession(identity), Path: "/", Expires: exp, MaxAge: int(12 * time.Hour / time.Second), HttpOnly: true, SameSite: http.SameSiteLaxMode})
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 	if a.oidcClaimsAreUser(claims) {
 		exp := time.Now().Add(12 * time.Hour)
-		username := firstNonEmpty(claimString(claims, "preferred_username"), claimString(claims, "email"), claimString(claims, "name"), claimString(claims, "sub"))
-		http.SetCookie(w, &http.Cookie{Name: ssoUserCookieName, Value: signSimpleSession(username, exp.Unix(), a.Cfg.AdminPassword), Path: "/", Expires: exp, MaxAge: int(12 * time.Hour / time.Second), HttpOnly: true, SameSite: http.SameSiteLaxMode})
+		identity := identityFromOIDCClaims(claims, "user", exp.Unix())
+		if staff, err := a.syncSSOStaffUser(claims, identity); err == nil {
+			identity.StaffID = staff.ID
+			if strings.TrimSpace(staff.Name) != "" {
+				identity.Name = staff.Name
+			}
+		} else {
+			log.Printf("sync SSO staff user warning: %v", err)
+		}
+		http.SetCookie(w, &http.Cookie{Name: ssoUserCookieName, Value: a.signIdentitySession(identity), Path: "/", Expires: exp, MaxAge: int(12 * time.Hour / time.Second), HttpOnly: true, SameSite: http.SameSiteLaxMode})
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 	log.Printf("SSO login rejected: subject=%s username=%s email=%s roles=%v", claimString(claims, "sub"), claimString(claims, "preferred_username"), claimString(claims, "email"), collectRoles(claims))
 	http.Redirect(w, r, "/?sso=forbidden", http.StatusSeeOther)
+}
+
+func (a *App) syncSSOStaffUser(claims map[string]any, identity AuthIdentity) (StaffUser, error) {
+	users, err := a.Store.LoadUsers()
+	if err != nil {
+		return StaffUser{}, err
+	}
+	now := time.Now().Format(time.RFC3339)
+	sub := strings.TrimSpace(claimString(claims, "sub"))
+	username := strings.TrimSpace(claimString(claims, "preferred_username"))
+	email := strings.TrimSpace(claimString(claims, "email"))
+	name := strings.TrimSpace(identity.Name)
+	if name == "" {
+		name = firstNonEmpty(username, email, sub)
+	}
+	match := -1
+	for i := range users {
+		if sub != "" && strings.TrimSpace(users[i].SSOSub) == sub {
+			match = i
+			break
+		}
+	}
+	if match < 0 && email != "" {
+		for i := range users {
+			if sameString(users[i].Email, email) || sameString(users[i].SSOEmail, email) {
+				match = i
+				break
+			}
+		}
+	}
+	if match < 0 && username != "" {
+		for i := range users {
+			if sameString(users[i].SSOUsername, username) || sameString(users[i].Name, username) {
+				match = i
+				break
+			}
+		}
+	}
+	if match < 0 && name != "" {
+		for i := range users {
+			if sameString(users[i].Name, name) {
+				match = i
+				break
+			}
+		}
+	}
+	if match < 0 && email != "" {
+		local := strings.SplitN(email, "@", 2)[0]
+		for i := range users {
+			if sameString(users[i].Name, local) {
+				match = i
+				break
+			}
+		}
+	}
+	if match >= 0 {
+		if strings.TrimSpace(users[match].Name) == "" {
+			users[match].Name = name
+		}
+		if strings.TrimSpace(users[match].Email) == "" && email != "" {
+			users[match].Email = email
+		}
+		users[match].SSOProvider = strings.TrimSpace(a.effectiveSSOSettings().IssuerURL)
+		users[match].SSOSub = sub
+		users[match].SSOUsername = username
+		users[match].SSOEmail = email
+		users[match].LastSSOLoginAt = now
+		users[match].Enabled = true
+		users[match].UpdatedAt = now
+		if strings.TrimSpace(users[match].CreatedBy) == "" {
+			users[match].CreatedBy = "sso"
+		}
+		if err := a.Store.SaveUsers(users); err != nil {
+			return StaffUser{}, err
+		}
+		return users[match], nil
+	}
+	staff := StaffUser{
+		ID:             newID("user"),
+		Name:           name,
+		Email:          email,
+		Enabled:        true,
+		CreatedBy:      "sso",
+		SSOProvider:    strings.TrimSpace(a.effectiveSSOSettings().IssuerURL),
+		SSOSub:         sub,
+		SSOUsername:    username,
+		SSOEmail:       email,
+		LastSSOLoginAt: now,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	users = append(users, staff)
+	if err := a.Store.SaveUsers(users); err != nil {
+		return StaffUser{}, err
+	}
+	return staff, nil
+}
+
+func sameString(a string, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b)) && strings.TrimSpace(a) != "" && strings.TrimSpace(b) != ""
 }
 
 func (a *App) exchangeOIDCCode(tokenEndpoint string, code string) (oidcTokenResponse, error) {
@@ -267,6 +384,27 @@ func (a *App) oidcClaimsAreUser(claims map[string]any) bool {
 		}
 	}
 	return false
+}
+
+func identityFromOIDCClaims(claims map[string]any, role string, exp int64) AuthIdentity {
+	given := claimString(claims, "given_name")
+	family := claimString(claims, "family_name")
+	fullFromParts := strings.TrimSpace(strings.TrimSpace(given) + " " + strings.TrimSpace(family))
+	name := firstNonEmpty(
+		claimString(claims, "name"),
+		fullFromParts,
+		claimString(claims, "preferred_username"),
+		claimString(claims, "email"),
+		claimString(claims, "sub"),
+	)
+	return AuthIdentity{
+		Name:     name,
+		Email:    claimString(claims, "email"),
+		Username: claimString(claims, "preferred_username"),
+		Role:     role,
+		Source:   "sso",
+		Exp:      exp,
+	}
 }
 
 func firstNonEmpty(values ...string) string {
