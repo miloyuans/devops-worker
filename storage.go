@@ -1264,7 +1264,7 @@ func (s *Storage) SyncActiveItemsWithLatestShifts(loc *time.Location) (ShiftUpda
 			newStart := start.Format(time.RFC3339)
 			newEnd := end.Format(time.RFC3339)
 			notifyEnabled := shiftNotificationEnabled(shift)
-			if item.ShiftName != shift.Name || item.ShiftShortName != shift.ShortName || item.StartTime != newStart || item.EndTime != newEnd || item.NotifyEnabled == nil || *item.NotifyEnabled != notifyEnabled || (userOK && (item.StaffName != user.Name || item.TelegramUserID != user.TelegramUserID)) {
+			if item.ShiftName != shift.Name || item.ShiftShortName != shift.ShortName || item.StartTime != newStart || item.EndTime != newEnd || item.NotifyEnabled == nil || *item.NotifyEnabled != notifyEnabled || (userOK && (item.StaffName != user.Name || item.StaffPhone != strings.TrimSpace(user.Phone) || item.TelegramUserID != user.TelegramUserID)) {
 				item.ShiftName = shift.Name
 				item.ShiftShortName = shift.ShortName
 				item.StartTime = newStart
@@ -1272,6 +1272,7 @@ func (s *Storage) SyncActiveItemsWithLatestShifts(loc *time.Location) (ShiftUpda
 				item.NotifyEnabled = boolPtr(notifyEnabled)
 				if userOK {
 					item.StaffName = user.Name
+					item.StaffPhone = strings.TrimSpace(user.Phone)
 					item.TelegramUserID = user.TelegramUserID
 				}
 				changed++

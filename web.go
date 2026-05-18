@@ -270,10 +270,11 @@ func (a *App) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/users", http.StatusSeeOther)
 		return
 	}
+	phone := strings.TrimSpace(r.FormValue("phone"))
 	tgID := parseFormInt64(r.FormValue("telegram_user_id"))
 	users, _ := a.Store.LoadUsers()
 	now := time.Now().Format(time.RFC3339)
-	users = append(users, StaffUser{ID: newID("user"), Name: name, TelegramUserID: tgID, Enabled: true, CreatedBy: a.role(r), CreatedAt: now, UpdatedAt: now})
+	users = append(users, StaffUser{ID: newID("user"), Name: name, Phone: phone, TelegramUserID: tgID, Enabled: true, CreatedBy: a.role(r), CreatedAt: now, UpdatedAt: now})
 	if err := a.Store.SaveUsers(users); err != nil {
 		log.Printf("save user error: %v", err)
 	}
@@ -297,6 +298,7 @@ func (a *App) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 			}
 			wasEnabled := users[i].Enabled
 			users[i].Name = strings.TrimSpace(r.FormValue("name"))
+			users[i].Phone = strings.TrimSpace(r.FormValue("phone"))
 			users[i].TelegramUserID = parseFormInt64(r.FormValue("telegram_user_id"))
 			users[i].Enabled = r.FormValue("enabled") == "true"
 			users[i].UpdatedAt = time.Now().Format(time.RFC3339)

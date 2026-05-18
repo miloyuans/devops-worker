@@ -33,6 +33,7 @@ type ShiftConfig struct {
 type StaffUser struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
+	Phone          string `json:"phone,omitempty"`
 	TelegramUserID int64  `json:"telegram_user_id"`
 	Enabled        bool   `json:"enabled"`
 	CreatedBy      string `json:"created_by,omitempty"` // admin/user，用于 Web 权限隔离
@@ -66,6 +67,7 @@ type ScheduleItem struct {
 	Date           string `json:"date"`
 	StaffID        string `json:"staff_id"`
 	StaffName      string `json:"staff_name"`
+	StaffPhone     string `json:"staff_phone,omitempty"`
 	TelegramUserID int64  `json:"telegram_user_id"`
 	ShiftCode      string `json:"shift_code"`
 	ShiftName      string `json:"shift_name"`
@@ -126,6 +128,7 @@ type NotificationRecord struct {
 	Date           string `json:"date"`
 	StaffID        string `json:"staff_id"`
 	StaffName      string `json:"staff_name"`
+	StaffPhone     string `json:"staff_phone,omitempty"`
 	ShiftCode      string `json:"shift_code"`
 	ShiftName      string `json:"shift_name"`
 	TelegramUserID int64  `json:"telegram_user_id"`

@@ -648,6 +648,7 @@ func (t *TelegramService) notificationRecordFromTask(task NotificationTask) Noti
 		Date:           item.Date,
 		StaffID:        item.StaffID,
 		StaffName:      item.StaffName,
+		StaffPhone:     strings.TrimSpace(item.StaffPhone),
 		ShiftCode:      item.ShiftCode,
 		ShiftName:      item.ShiftName,
 		TelegramUserID: item.TelegramUserID,
@@ -664,7 +665,10 @@ func (t *TelegramService) sendReminderTask(task NotificationTask) error {
 	if item.TelegramUserID > 0 {
 		mention = fmt.Sprintf("<a href=\"tg://user?id=%d\">%s</a>", item.TelegramUserID, html.EscapeString(item.StaffName))
 	}
-	body := fmt.Sprintf("⏰ <b>上班提醒</b>\n\n员工: %s\n班次: %s\n时间: %s", mention, html.EscapeString(item.ShiftName), html.EscapeString(formatClock(item.StartTime)))
+	body := fmt.Sprintf("⏰ <b>工作提醒</b>\n\n员工: %s\n班次: %s\n时间: %s", mention, html.EscapeString(item.ShiftName), html.EscapeString(formatClock(item.StartTime)))
+	if strings.TrimSpace(item.StaffPhone) != "" {
+		body += fmt.Sprintf("\n电话: %s", html.EscapeString(strings.TrimSpace(item.StaffPhone)))
+	}
 	if strings.TrimSpace(t.Cfg.WorkOrderURL) != "" {
 		body += fmt.Sprintf("\n\n排班工单: %s", html.EscapeString(strings.TrimSpace(t.Cfg.WorkOrderURL)))
 	}
