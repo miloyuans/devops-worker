@@ -223,3 +223,12 @@ volumeMounts:
 - Shift codes are now generated automatically as unique random strings when creating a new shift. Operators no longer need to enter or maintain shift codes manually.
 - Shifts now include a `notify_enabled` setting. Custom shifts can opt out of Telegram reminder notifications. Rest, annual leave, and sick leave default to no notification.
 - Schedule calendar selection supports range picking: click a start date, then click an end date to automatically select the full range. Ctrl/Cmd-click can still be used for manual multi-select adjustments.
+
+## Web UI 审批
+
+审批页 `/approvals` 现在支持 Web UI 直接审批：
+
+- 普通用户只能查看审批记录和 HTML 预览。
+- 只有通过 `/login` 登录的 admin 超级管理员可以点击“通过生效”或“拒绝”。
+- Web UI 审批通过后会立即合并到最新正式排班并生效，同时刷新通知任务队列。
+- 如果该审批曾发送 Telegram 审批窗口，Web UI 审批完成后也会同步更新 Telegram 消息状态。

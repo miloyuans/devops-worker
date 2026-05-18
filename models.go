@@ -104,22 +104,23 @@ type ApprovalMessageRef struct {
 }
 
 type Approval struct {
-	ID            string               `json:"id"`
-	TransactionID string               `json:"transaction_id"`
-	Status        string               `json:"status"`
-	CreatedBy     string               `json:"created_by"`
-	CreatedAt     string               `json:"created_at"`
-	ReviewedBy    int64                `json:"reviewed_by,omitempty"`
-	ReviewedAt    string               `json:"reviewed_at,omitempty"`
-	ApproverIDs   []int64              `json:"approver_ids"`
-	Rules         []ScheduleRule       `json:"rules"`
-	PreviewItems  []ScheduleItem       `json:"preview_items"`
-	PreviewHTML   string               `json:"preview_html"`
-	MessageRefs   []ApprovalMessageRef `json:"message_refs,omitempty"`
-	BaseRevision  int                  `json:"base_revision"`
-	NewRevision   int                  `json:"new_revision"`
-	RejectReason  string               `json:"reject_reason,omitempty"`
-	StatusMessage string               `json:"status_message,omitempty"`
+	ID             string               `json:"id"`
+	TransactionID  string               `json:"transaction_id"`
+	Status         string               `json:"status"`
+	CreatedBy      string               `json:"created_by"`
+	CreatedAt      string               `json:"created_at"`
+	ReviewedBy     int64                `json:"reviewed_by,omitempty"`
+	ReviewedByName string               `json:"reviewed_by_name,omitempty"`
+	ReviewedAt     string               `json:"reviewed_at,omitempty"`
+	ApproverIDs    []int64              `json:"approver_ids"`
+	Rules          []ScheduleRule       `json:"rules"`
+	PreviewItems   []ScheduleItem       `json:"preview_items"`
+	PreviewHTML    string               `json:"preview_html"`
+	MessageRefs    []ApprovalMessageRef `json:"message_refs,omitempty"`
+	BaseRevision   int                  `json:"base_revision"`
+	NewRevision    int                  `json:"new_revision"`
+	RejectReason   string               `json:"reject_reason,omitempty"`
+	StatusMessage  string               `json:"status_message,omitempty"`
 }
 
 type NotificationRecord struct {

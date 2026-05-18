@@ -429,6 +429,108 @@ func (s *Storage) Reject(id string, reviewerID int64, reason string) (*Approval,
 	return updated, err
 }
 
+func (s *Storage) ApproveByAdmin(id string, adminName string, loc *time.Location) (*Approval, error) {
+	var updated *Approval
+	err := s.WithLock(func() error {
+		approval, pendingPath, err := s.LoadPendingApproval(id)
+		if err != nil {
+			return err
+		}
+		if approval.Status != "pending" {
+			return fmt.Errorf("审批单状态不是 pending")
+		}
+		active, err := s.LoadActive()
+		if err != nil {
+			return err
+		}
+		users, err := s.LoadUsers()
+		if err != nil {
+			return err
+		}
+		shifts, err := s.LoadShifts()
+		if err != nil {
+			return err
+		}
+		updateItems, err := BuildScheduleItems(approval.Rules, users, shifts, loc)
+		if err != nil {
+			return err
+		}
+		finalItems := NormalizeScheduleItems(MergeScheduleItems(active.Items, updateItems))
+		now := time.Now().Format(time.RFC3339)
+		newRevision := active.Revision + 1
+		if html, err := RenderPreviewHTML(approval.ID, finalItems, active.Revision, newRevision); err == nil {
+			_ = writeFileAtomic(filepath.Join(s.Dir, approval.PreviewHTML), []byte(html))
+		}
+		if strings.TrimSpace(adminName) == "" {
+			adminName = "admin"
+		}
+		newActive := ActiveSchedule{
+			Revision:         newRevision,
+			VersionID:        newVersionID(newRevision),
+			EffectiveAt:      now,
+			ApprovedBy:       0,
+			SourceApprovalID: approval.ID,
+			Items:            finalItems,
+		}
+		if err := s.SaveActiveLocked(newActive); err != nil {
+			return err
+		}
+		if err := s.writeByDayAndHistoryLocked(newActive); err != nil {
+			return err
+		}
+		approval.Status = "approved"
+		approval.ReviewedBy = 0
+		approval.ReviewedByName = adminName
+		approval.ReviewedAt = now
+		approval.NewRevision = newRevision
+		approval.PreviewItems = finalItems
+		approval.StatusMessage = "Web UI 超级管理员审批通过，排班已按最新正式数据合并生效"
+		approvedPath := filepath.Join(s.Dir, "approvals", "approved", approval.ID+".json")
+		if err := writeJSONAtomic(approvedPath, approval); err != nil {
+			return err
+		}
+		if err := os.Remove(pendingPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		updated = &approval
+		return nil
+	})
+	return updated, err
+}
+
+func (s *Storage) RejectByAdmin(id string, adminName string, reason string) (*Approval, error) {
+	var updated *Approval
+	err := s.WithLock(func() error {
+		approval, pendingPath, err := s.LoadPendingApproval(id)
+		if err != nil {
+			return err
+		}
+		if approval.Status != "pending" {
+			return fmt.Errorf("审批单状态不是 pending")
+		}
+		if strings.TrimSpace(adminName) == "" {
+			adminName = "admin"
+		}
+		now := time.Now().Format(time.RFC3339)
+		approval.Status = "rejected"
+		approval.ReviewedBy = 0
+		approval.ReviewedByName = adminName
+		approval.ReviewedAt = now
+		approval.RejectReason = reason
+		approval.StatusMessage = "Web UI 超级管理员审批拒绝，排班未生效"
+		rejectedPath := filepath.Join(s.Dir, "approvals", "rejected", approval.ID+".json")
+		if err := writeJSONAtomic(rejectedPath, approval); err != nil {
+			return err
+		}
+		if err := os.Remove(pendingPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		updated = &approval
+		return nil
+	})
+	return updated, err
+}
+
 func (s *Storage) writeByDayAndHistoryLocked(active ActiveSchedule) error {
 	byDate := map[string][]ScheduleItem{}
 	for _, item := range active.Items {

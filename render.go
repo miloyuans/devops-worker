@@ -132,19 +132,20 @@ func previewWeekdayName(w time.Weekday) string {
 
 func renderPage(wr *bytes.Buffer, name string, data PageData) error {
 	funcs := template.FuncMap{
-		"clock":          templateClock,
-		"dateOnly":       templateDateOnly,
-		"json":           templateJSON,
-		"versionLabel":   templateVersionLabel,
-		"compact":        compactID,
-		"tgName":         templateTGName,
-		"tgNames":        templateTGNames,
-		"approvalStatus": templateApprovalStatus,
-		"shortTime":      templateShortTime,
-		"shortTimeTZ":    templateShortTimeTZ,
-		"canEditShift":   templateCanEditShift,
-		"canEditUser":    templateCanEditUser,
-		"shiftNotify":    shiftNotificationEnabled,
+		"clock":            templateClock,
+		"dateOnly":         templateDateOnly,
+		"json":             templateJSON,
+		"versionLabel":     templateVersionLabel,
+		"compact":          compactID,
+		"tgName":           templateTGName,
+		"tgNames":          templateTGNames,
+		"approvalStatus":   templateApprovalStatus,
+		"approvalReviewer": templateApprovalReviewer,
+		"shortTime":        templateShortTime,
+		"shortTimeTZ":      templateShortTimeTZ,
+		"canEditShift":     templateCanEditShift,
+		"canEditUser":      templateCanEditUser,
+		"shiftNotify":      shiftNotificationEnabled,
 	}
 
 	tpl := template.Must(template.New("base").Funcs(funcs).Parse(baseTemplate + dashboardTemplate + usersTemplate + shiftsTemplate + scheduleTemplate + approvalsTemplate + historyTemplate))
@@ -223,6 +224,19 @@ func templateTGNames(ids []int64, users []StaffUser) string {
 	return strings.Join(names, "、")
 }
 
+func templateApprovalReviewer(a Approval, users []StaffUser) string {
+	if a.Status == "pending" {
+		return templateTGNames(a.ApproverIDs, users)
+	}
+	if strings.TrimSpace(a.ReviewedByName) != "" {
+		return a.ReviewedByName
+	}
+	if a.ReviewedBy != 0 {
+		return templateTGName(a.ReviewedBy, users)
+	}
+	return "-"
+}
+
 func templateCanEditShift(sh Shift, isAdmin bool) bool {
 	return isAdmin || sh.CreatedBy == "user"
 }
@@ -275,6 +289,6 @@ const shiftsTemplate = `{{define "shifts"}}{{template "layout_start" .}}<div cla
 
 const scheduleTemplate = `{{define "schedule"}}{{template "layout_start" .}}<div class="workbench schedule-workbench"><section class="panel-card calendar-card"><div class="calendar-head"><a class="btn secondary" href="/schedule?year={{.CalendarPrevYear}}&month={{.CalendarPrevMonth}}&date={{.SelectedDate}}">上月</a><div><div class="calendar-title">{{.CalendarYear}} 年 {{.CalendarMonth}} 月排班设置</div><div class="calendar-sub">右侧矩阵直接下拉编辑，左侧日历实时预览，最后统一提交审批</div></div><a class="btn secondary" href="/schedule?year={{.CalendarNextYear}}&month={{.CalendarNextMonth}}&date={{.SelectedDate}}">下月</a></div><div class="calendar" id="scheduleCalendar"><div class="weekday">周一</div><div class="weekday">周二</div><div class="weekday">周三</div><div class="weekday">周四</div><div class="weekday">周五</div><div class="weekday">周六</div><div class="weekday">周日</div>{{range .CalendarDays}}<button type="button" class="day {{if not .IsCurrentMonth}}dim{{end}} {{if .IsWeekend}}weekend{{end}} {{if eq .HolidayType "holiday"}}holiday{{end}} {{if eq .HolidayType "work"}}workday{{end}} {{if .IsToday}}today{{end}}" data-date="{{.Date}}" {{if not .IsCurrentMonth}}disabled{{end}}><div class="daytop"><div class="daynum">{{.Day}}</div>{{if .HolidayName}}<div class="holiday-label">{{.HolidayName}}</div>{{end}}</div><div class="items">{{range .Items}}<span class="chip">{{.StaffName}} {{.ShiftShortName}}</span>{{end}}</div></button>{{end}}</div><div class="row" style="margin-top:7px"><button type="button" class="btn secondary" onclick="clearSelectedDates()">清空选择</button><span class="hint" id="selectedHint">尚未选择日期</span></div><div class="draft-box"><div class="row" style="justify-content:space-between"><b>本月待提交草稿</b><div class="row"><button type="button" class="secondary" onclick="clearDraft()">清空草稿</button><button type="button" id="submitDraftBtn" onclick="submitDraftApproval()">提交草稿审批</button></div></div><p class="hint" id="draftEmpty">暂无草稿。直接在右侧矩阵单元格下拉修改即可实时加入草稿；左侧日历会同步预览最终结果。</p><div class="draft-list" id="draftList"></div><form id="draftSubmitForm" method="post" action="/schedule/submit"><input type="hidden" name="year" value="{{.CalendarYear}}"><input type="hidden" name="month" value="{{.CalendarMonth}}"><input type="hidden" name="created_by" value="{{.Role}}"><input type="hidden" name="draft_rules" id="draftRulesInput"></form></div></section><aside class="panel-card detail-card"><div class="meta-grid"><div class="meta"><div class="label">当前版本</div><b>{{versionLabel .Active}}</b></div><div class="meta"><div class="label">排班记录</div><b>{{len .Active.Items}}</b></div></div><h2 style="margin:4px 0 8px;font-size:16px">本月排班预览 / 直接编辑</h2><div class="month-tools"><div class="selected-note">已选日期：<span id="previewSelectedDates">尚未选择日期</span></div><div class="toolbar"><label class="field-mini">批量班次<select id="previewShiftSelect">{{range .Shifts}}{{if .Enabled}}<option value="{{.Code}}">{{.Name}}</option>{{end}}{{end}}</select></label><label class="inline-check"><input type="checkbox" id="previewOverwriteDraft"> 覆盖已编辑草稿</label><button type="button" class="secondary" onclick="selectAllPreviewUsers()">全选用户</button><button type="button" class="secondary" onclick="clearPreviewUsers()">取消用户</button><button type="button" onclick="confirmPreviewDraft()">批量填充预览</button></div><div class="hint">单个格子下拉后会立即加入草稿并可直接提交审批；批量填充默认不会覆盖已经手动编辑过的草稿，需要覆盖时再勾选“覆盖已编辑草稿”。</div></div><div class="month-matrix-wrap" id="monthPreviewMatrix"></div></aside></div><script>bindCalendar({calendarId:'scheduleCalendar',hintId:'selectedHint',status:{{json .DayStatus}},selected:'{{.SelectedDate}}',multi:true,emptyText:'当天没有排班'});initScheduleDraft({year:{{.CalendarYear}},month:{{.CalendarMonth}},userMap:{ {{range .Users}}'{{.ID}}':'{{.Name}}',{{end}} },shiftMap:{ {{range .Shifts}}'{{.Code}}':'{{.Name}}',{{end}} }});initSchedulePreviewEditor({users:{{json .Users}},shifts:{{json .Shifts}},days:{{json .CalendarDays}},status:{{json .DayStatus}}});</script>{{template "layout_end" .}}{{end}}`
 
-const approvalsTemplate = `{{define "approvals"}}{{template "layout_start" .}}<div class="card" style="overflow:auto;max-height:calc(100vh - 96px)"><h2>审批记录</h2><table><thead><tr><th>审批</th><th>状态</th><th>事务</th><th>创建</th><th>审批人</th><th>预览</th></tr></thead><tbody>{{range .Approvals}}<tr><td><span class="tag">{{compact .ID}}</span></td><td><span class="badge">{{approvalStatus .Status}}</span></td><td><span class="tag">{{compact .TransactionID}}</span></td><td>{{.CreatedBy}}<div class="hint">{{shortTimeTZ .CreatedAt $.Config.Timezone}}</div></td><td>{{if .ReviewedBy}}{{tgName .ReviewedBy $.Users}}{{else}}{{tgNames .ApproverIDs $.Users}}{{end}}</td><td><a class="btn secondary" href="/{{.PreviewHTML}}" target="_blank">HTML</a></td></tr>{{else}}<tr><td colspan="6">暂无审批记录</td></tr>{{end}}</tbody></table></div>{{template "layout_end" .}}{{end}}`
+const approvalsTemplate = `{{define "approvals"}}{{template "layout_start" .}}<div class="card" style="overflow:auto;max-height:calc(100vh - 96px)"><div class="row" style="justify-content:space-between;align-items:flex-start"><div><h2>审批记录</h2><p class="hint">Telegram 审批仍然可用；Web UI 审批仅允许 admin 超级管理员操作，普通用户只能查看。</p></div>{{if .IsAdmin}}<span class="pill ok">admin 可审批</span>{{else}}<span class="pill off">普通用户只读</span>{{end}}</div><table><thead><tr><th>审批</th><th>状态</th><th>事务</th><th>创建</th><th>审批人/处理人</th><th>结果</th><th>预览</th><th>操作</th></tr></thead><tbody>{{range .Approvals}}<tr><td><span class="tag">{{compact .ID}}</span></td><td><span class="badge">{{approvalStatus .Status}}</span></td><td><span class="tag">{{compact .TransactionID}}</span></td><td>{{.CreatedBy}}<div class="hint">{{shortTimeTZ .CreatedAt $.Config.Timezone}}</div></td><td>{{approvalReviewer . $.Users}}</td><td>{{if .StatusMessage}}<span class="hint">{{.StatusMessage}}</span>{{else}}-{{end}}</td><td><a class="btn secondary" href="/{{.PreviewHTML}}" target="_blank">HTML</a></td><td>{{if and $.IsAdmin (eq .Status "pending")}}<form method="post" action="/approvals/approve" style="display:inline" onsubmit="return confirm('确认通过该审批并立即生效？')"><input type="hidden" name="id" value="{{.ID}}"><button type="submit">通过生效</button></form><form method="post" action="/approvals/reject" style="display:inline;margin-left:6px" onsubmit="return confirm('确认拒绝该审批？')"><input type="hidden" name="id" value="{{.ID}}"><button class="danger" type="submit">拒绝</button></form>{{else}}<span class="hint">{{if eq .Status "pending"}}等待审批{{else}}已结束{{end}}</span>{{end}}</td></tr>{{else}}<tr><td colspan="8">暂无审批记录</td></tr>{{end}}</tbody></table></div>{{template "layout_end" .}}{{end}}`
 
 const historyTemplate = `{{define "history"}}{{template "layout_start" .}}<div class="workbench"><section class="panel-card calendar-card"><div class="calendar-head"><a class="btn secondary" href="/history?year={{.CalendarPrevYear}}&month={{.CalendarPrevMonth}}&date={{.SelectedDate}}">上月</a><div><div class="calendar-title">{{.CalendarYear}} 年 {{.CalendarMonth}} 月历史</div><div class="calendar-sub">点击日期查看右侧历史排班</div></div><a class="btn secondary" href="/history?year={{.CalendarNextYear}}&month={{.CalendarNextMonth}}&date={{.SelectedDate}}">下月</a></div><div class="calendar" id="historyCalendar"><div class="weekday">周一</div><div class="weekday">周二</div><div class="weekday">周三</div><div class="weekday">周四</div><div class="weekday">周五</div><div class="weekday">周六</div><div class="weekday">周日</div>{{range .CalendarDays}}<button type="button" class="day {{if not .IsCurrentMonth}}dim{{end}} {{if .IsWeekend}}weekend{{end}} {{if eq .HolidayType "holiday"}}holiday{{end}} {{if eq .HolidayType "work"}}workday{{end}} {{if .IsToday}}today{{end}} {{if .IsSelected}}selected{{end}}" data-date="{{.Date}}"><div class="daytop"><div class="daynum">{{.Day}}</div>{{if .HolidayName}}<div class="holiday-label">{{.HolidayName}}</div>{{end}}</div><div class="items">{{range .Items}}<span class="chip">{{.StaffName}} {{.ShiftShortName}}</span>{{end}}</div></button>{{end}}</div></section><aside class="panel-card detail-card"><h2 style="margin:4px 0 8px;font-size:16px"><span data-current-date>{{.SelectedDate}}</span> 历史排班</h2><form method="get" action="/history" class="row" style="margin-bottom:8px"><input type="date" name="date" value="{{.HistoryDate}}"><button type="submit">跳转</button></form><div class="detail-scroll"><div class="list" id="historyDayDetail"></div></div></aside></div><script>bindCalendar({calendarId:'historyCalendar',detailId:'historyDayDetail',status:{{json .DayStatus}},selected:'{{.SelectedDate}}',multi:false,emptyText:'当天没有历史排班'});</script>{{template "layout_end" .}}{{end}}`

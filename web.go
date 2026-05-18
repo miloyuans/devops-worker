@@ -59,6 +59,8 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/schedule", a.handleSchedule)
 	mux.HandleFunc("/schedule/submit", a.handleScheduleSubmit)
 	mux.HandleFunc("/approvals", a.handleApprovals)
+	mux.HandleFunc("/approvals/approve", a.handleApprovalApprove)
+	mux.HandleFunc("/approvals/reject", a.handleApprovalReject)
 	mux.HandleFunc("/history", a.handleHistory)
 	mux.Handle("/previews/", http.StripPrefix("/previews/", http.FileServer(http.Dir(filepath.Join(a.Cfg.DataDir, "previews")))))
 	appMux.Handle("/", a.roleMiddleware(mux))
@@ -636,6 +638,59 @@ func (a *App) handleApprovals(w http.ResponseWriter, r *http.Request) {
 		data.Approvals = approvals
 	}
 	a.render(w, "approvals", data)
+}
+
+func (a *App) handleApprovalApprove(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdmin(r) {
+		http.Error(w, "只有超级管理员可以通过 Web UI 审批生效", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/approvals", http.StatusSeeOther)
+		return
+	}
+	_ = r.ParseForm()
+	id := strings.TrimSpace(r.FormValue("id"))
+	if id == "" {
+		http.Redirect(w, r, "/approvals", http.StatusSeeOther)
+		return
+	}
+	approval, err := a.Store.ApproveByAdmin(id, a.Cfg.AdminUsername, a.Loc)
+	if err != nil {
+		a.renderError(w, "审批记录", "Web UI 审批通过失败: "+err.Error())
+		return
+	}
+	if a.TG != nil {
+		a.TG.editApprovalMessages(approval)
+		a.TG.WakeNotificationQueue()
+	}
+	http.Redirect(w, r, "/approvals", http.StatusSeeOther)
+}
+
+func (a *App) handleApprovalReject(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdmin(r) {
+		http.Error(w, "只有超级管理员可以通过 Web UI 拒绝审批", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/approvals", http.StatusSeeOther)
+		return
+	}
+	_ = r.ParseForm()
+	id := strings.TrimSpace(r.FormValue("id"))
+	if id == "" {
+		http.Redirect(w, r, "/approvals", http.StatusSeeOther)
+		return
+	}
+	approval, err := a.Store.RejectByAdmin(id, a.Cfg.AdminUsername, "web ui admin rejected")
+	if err != nil {
+		a.renderError(w, "审批记录", "Web UI 审批拒绝失败: "+err.Error())
+		return
+	}
+	if a.TG != nil {
+		a.TG.editApprovalMessages(approval)
+	}
+	http.Redirect(w, r, "/approvals", http.StatusSeeOther)
 }
 
 func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {

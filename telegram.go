@@ -331,6 +331,9 @@ func (t *TelegramService) editApprovalMessages(a *Approval) {
 		return
 	}
 	reviewer := t.telegramDisplayName(a.ReviewedBy)
+	if strings.TrimSpace(a.ReviewedByName) != "" {
+		reviewer = a.ReviewedByName
+	}
 	statusLine := "审批已结束"
 	if a.Status == "approved" {
 		statusLine = "✅ " + reviewer + " 审批通过，排班已按最新正式数据合并生效"
