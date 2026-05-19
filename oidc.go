@@ -212,7 +212,7 @@ func (a *App) syncSSOStaffUser(claims map[string]any, identity AuthIdentity) (St
 	}
 	match := -1
 	for i := range users {
-		if sub != "" && strings.TrimSpace(users[i].SSOSub) == sub {
+		if sub != "" && sameString(users[i].SSOSub, sub) {
 			match = i
 			break
 		}
@@ -236,15 +236,6 @@ func (a *App) syncSSOStaffUser(claims map[string]any, identity AuthIdentity) (St
 	if match < 0 && name != "" {
 		for i := range users {
 			if sameString(users[i].Name, name) {
-				match = i
-				break
-			}
-		}
-	}
-	if match < 0 && email != "" {
-		local := strings.SplitN(email, "@", 2)[0]
-		for i := range users {
-			if sameString(users[i].Name, local) {
 				match = i
 				break
 			}

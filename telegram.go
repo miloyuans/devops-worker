@@ -225,7 +225,8 @@ func (t *TelegramService) SendApproval(a *Approval) error {
 		return nil
 	}
 	approverText := t.approverMentionText(a.ApproverIDs)
-	caption := fmt.Sprintf("📋 <b>排班策略审批请求</b>\n\n审批ID: <code>%s</code>\n事务ID: <code>%s</code>\n提交人: %s\n变更记录: %d\n审批人: %s\n\n请打开 HTML 附件查看预览。任一审批人点击同意或拒绝后，所有审批窗口会同步更新状态。", html.EscapeString(a.ID), html.EscapeString(a.TransactionID), html.EscapeString(a.CreatedBy), len(a.Rules), approverText)
+	createdAtText := dateTimeWithWeekday(a.CreatedAt, t.Loc)
+	caption := fmt.Sprintf("📋 <b>排班策略审批请求</b>\n\n审批ID: <code>%s</code>\n事务ID: <code>%s</code>\n提交人: %s\n提交时间: %s\n变更记录: %d\n审批人: %s\n\n请打开 HTML 附件查看预览。任一审批人点击同意或拒绝后，所有审批窗口会同步更新状态。", html.EscapeString(a.ID), html.EscapeString(a.TransactionID), html.EscapeString(a.CreatedBy), html.EscapeString(createdAtText), len(a.Rules), approverText)
 	replyMarkup := approvalActionMarkup(a.ID, false)
 	previewPath := filepath.Join(t.Cfg.DataDir, a.PreviewHTML)
 	refs := make([]ApprovalMessageRef, 0, len(t.Cfg.GroupChatIDs)+len(a.ApproverIDs))
@@ -340,7 +341,7 @@ func (t *TelegramService) editApprovalMessages(a *Approval) {
 	} else if a.Status == "rejected" {
 		statusLine = "❌ " + reviewer + " 审批拒绝，本次策略未生效"
 	}
-	caption := fmt.Sprintf("📋 <b>排班策略审批结果</b>\n\n审批ID: <code>%s</code>\n事务ID: <code>%s</code>\n状态: %s\n处理时间: %s\n\n所有审批窗口已同步更新。", html.EscapeString(a.ID), html.EscapeString(a.TransactionID), html.EscapeString(statusLine), html.EscapeString(a.ReviewedAt))
+	caption := fmt.Sprintf("📋 <b>排班策略审批结果</b>\n\n审批ID: <code>%s</code>\n事务ID: <code>%s</code>\n状态: %s\n处理时间: %s\n\n所有审批窗口已同步更新。", html.EscapeString(a.ID), html.EscapeString(a.TransactionID), html.EscapeString(statusLine), html.EscapeString(dateTimeWithWeekday(a.ReviewedAt, t.Loc)))
 	for _, ref := range a.MessageRefs {
 		if err := t.editMessageCaption(ref.ChatID, ref.MessageID, caption, "HTML", approvalActionMarkup(a.ID, true)); err != nil {
 			log.Printf("edit approval message failed chat=%d msg=%d: %v", ref.ChatID, ref.MessageID, err)
@@ -390,7 +391,7 @@ func (t *TelegramService) handleCallback(cq *telegramCallbackQuery) {
 		// Approval changes the active schedule, so refresh notification tasks
 		// immediately instead of waiting for the next 300 second queue cycle.
 		t.WakeNotificationQueue()
-		t.replyToCallbackMessage(cq, fmt.Sprintf("✅ 审批已通过并生效\n审批ID: %s\n审批人: %s", approval.ID, t.telegramDisplayName(reviewerID)))
+		t.replyToCallbackMessage(cq, fmt.Sprintf("✅ 审批已通过并生效\n审批ID: %s\n审批人: %s\n处理时间: %s", approval.ID, t.telegramDisplayName(reviewerID), dateTimeWithWeekday(approval.ReviewedAt, t.Loc)))
 	case "reject":
 		approval, err := t.Store.Reject(approvalID, reviewerID, "telegram callback rejected")
 		if err != nil {
@@ -399,7 +400,7 @@ func (t *TelegramService) handleCallback(cq *telegramCallbackQuery) {
 		}
 		t.answerCallback(cq.ID, "已拒绝，本次策略未生效", true)
 		t.editApprovalMessages(approval)
-		t.replyToCallbackMessage(cq, fmt.Sprintf("❌ 审批已拒绝，策略未生效\n审批ID: %s\n审批人: %s", approval.ID, t.telegramDisplayName(reviewerID)))
+		t.replyToCallbackMessage(cq, fmt.Sprintf("❌ 审批已拒绝，策略未生效\n审批ID: %s\n审批人: %s\n处理时间: %s", approval.ID, t.telegramDisplayName(reviewerID), dateTimeWithWeekday(approval.ReviewedAt, t.Loc)))
 	case "noop":
 		t.answerCallback(cq.ID, "该审批已经结束", false)
 	case "read":
@@ -523,12 +524,13 @@ func (t *TelegramService) handleText(msg *telegramMessage) {
 		_ = t.sendMessage(msg.Chat.ID, threadID, "查询排班失败: "+err.Error(), "")
 		return
 	}
+	dateTitle := dateWithWeekday(today, t.Loc)
 	if len(items) == 0 {
-		_ = t.sendMessage(msg.Chat.ID, threadID, fmt.Sprintf("📅 %s\n\n今天没有排班。", today), "")
+		_ = t.sendMessage(msg.Chat.ID, threadID, fmt.Sprintf("📅 %s\n\n今天没有排班。", dateTitle), "")
 		return
 	}
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("📅 <b>%s 今日排班</b>\n\n", html.EscapeString(today)))
+	b.WriteString(fmt.Sprintf("📅 <b>%s 今日排班</b>\n\n", html.EscapeString(dateTitle)))
 	for _, item := range items {
 		b.WriteString(fmt.Sprintf("• %s %s %s-%s\n", html.EscapeString(item.StaffName), html.EscapeString(item.ShiftName), html.EscapeString(formatClock(item.StartTime)), html.EscapeString(formatClock(item.EndTime))))
 	}
@@ -567,7 +569,7 @@ func (t *TelegramService) maybeSendDailyScheduleReport() time.Duration {
 	statuses := t.Store.BuildScheduleItemStatuses(items, t.Loc)
 	messages := t.buildDailyScheduleReportMessages(date, statuses)
 	if len(messages) == 0 {
-		messages = []string{fmt.Sprintf("📋 <b>%s 排班明细</b>\n\n今日无排班。", html.EscapeString(date))}
+		messages = []string{fmt.Sprintf("📋 <b>%s 排班明细</b>\n\n今日无排班。", html.EscapeString(dateWithWeekday(date, t.Loc)))}
 	}
 
 	allSent := true
@@ -675,7 +677,7 @@ func (t *TelegramService) buildDailyScheduleReportMessages(date string, statuses
 		return groups[i].Name < groups[j].Name
 	})
 
-	header := fmt.Sprintf("📋 <b>%s 排班明细</b>\n<code>自动日报 %s</code>\n", html.EscapeString(date), html.EscapeString(strings.TrimSpace(t.Cfg.DailyReportTime)))
+	header := fmt.Sprintf("📋 <b>%s 排班明细</b>\n<code>自动日报 %s</code>\n", html.EscapeString(dateWithWeekday(date, t.Loc)), html.EscapeString(strings.TrimSpace(t.Cfg.DailyReportTime)))
 	if strings.TrimSpace(t.Cfg.WorkOrderURL) != "" {
 		header += fmt.Sprintf("工单: %s\n", html.EscapeString(strings.TrimSpace(t.Cfg.WorkOrderURL)))
 	}
@@ -903,7 +905,7 @@ func (t *TelegramService) sendReminderTask(task NotificationTask) error {
 	if item.TelegramUserID > 0 {
 		mention = fmt.Sprintf("<a href=\"tg://user?id=%d\">%s</a>", item.TelegramUserID, html.EscapeString(item.StaffName))
 	}
-	body := fmt.Sprintf("⏰ <b>工作提醒</b>\n\n员工: %s\n班次: %s\n时间: %s", mention, html.EscapeString(item.ShiftName), html.EscapeString(formatClock(item.StartTime)))
+	body := fmt.Sprintf("⏰ <b>工作提醒</b>\n\n员工: %s\n日期: %s\n班次: %s\n时间: %s", mention, html.EscapeString(dateWithWeekday(item.Date, t.Loc)), html.EscapeString(item.ShiftName), html.EscapeString(formatClock(item.StartTime)))
 	if strings.TrimSpace(item.StaffPhone) != "" {
 		body += fmt.Sprintf("\n电话: %s", html.EscapeString(strings.TrimSpace(item.StaffPhone)))
 	}
@@ -973,6 +975,57 @@ func (t *TelegramService) sendMessageWithMarkup(chatID int64, threadID int, text
 		return fmt.Errorf(resp.Description)
 	}
 	return nil
+}
+
+func chineseWeekdayName(w time.Weekday) string {
+	switch w {
+	case time.Monday:
+		return "周一"
+	case time.Tuesday:
+		return "周二"
+	case time.Wednesday:
+		return "周三"
+	case time.Thursday:
+		return "周四"
+	case time.Friday:
+		return "周五"
+	case time.Saturday:
+		return "周六"
+	case time.Sunday:
+		return "周日"
+	default:
+		return ""
+	}
+}
+
+func dateWithWeekday(date string, loc *time.Location) string {
+	date = strings.TrimSpace(date)
+	if loc == nil {
+		loc = time.Local
+	}
+	if d, err := time.ParseInLocation("2006-01-02", date, loc); err == nil {
+		return fmt.Sprintf("%s %s", d.Format("2006-01-02"), chineseWeekdayName(d.Weekday()))
+	}
+	if ts, err := time.Parse(time.RFC3339, date); err == nil {
+		t := ts.In(loc)
+		return fmt.Sprintf("%s %s", t.Format("2006-01-02"), chineseWeekdayName(t.Weekday()))
+	}
+	return date
+}
+
+func dateTimeWithWeekday(rfc string, loc *time.Location) string {
+	rfc = strings.TrimSpace(rfc)
+	if rfc == "" {
+		return "-"
+	}
+	if loc == nil {
+		loc = time.Local
+	}
+	if ts, err := time.Parse(time.RFC3339, rfc); err == nil {
+		t := ts.In(loc)
+		return fmt.Sprintf("%s %s %s", t.Format("2006-01-02"), chineseWeekdayName(t.Weekday()), t.Format("15:04"))
+	}
+	return rfc
 }
 
 func formatClock(rfc string) string {

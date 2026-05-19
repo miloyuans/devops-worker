@@ -6,8 +6,10 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -141,6 +143,8 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/users/create", a.handleUserCreate)
 	mux.HandleFunc("/users/update", a.handleUserUpdate)
 	mux.HandleFunc("/users/delete", a.handleUserDelete)
+	mux.HandleFunc("/users/export", a.handleUsersExport)
+	mux.HandleFunc("/users/import", a.handleUsersImport)
 	mux.HandleFunc("/shifts", a.handleShifts)
 	mux.HandleFunc("/shifts/create", a.handleShiftCreate)
 	mux.HandleFunc("/shifts/update", a.handleShiftUpdate)
@@ -396,6 +400,9 @@ func (a *App) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleUsers(w http.ResponseWriter, r *http.Request) {
 	data := a.basePage(r, "用户管理")
+	if msg := strings.TrimSpace(r.URL.Query().Get("msg")); msg != "" {
+		data.Message = msg
+	}
 	users, err := a.Store.LoadUsers()
 	if err != nil {
 		data.Error = err.Error()
@@ -518,6 +525,273 @@ func (a *App) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	http.Redirect(w, r, "/users", http.StatusSeeOther)
+}
+
+func (a *App) handleUsersExport(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdmin(r) {
+		http.Error(w, "只有超级管理员可以导出用户", http.StatusForbidden)
+		return
+	}
+	users, err := a.Store.LoadUsers()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="devops-worker-users.csv"`)
+	_, _ = w.Write([]byte("\ufeff"))
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"id", "name", "email", "phone", "telegram_user_id", "enabled", "created_by", "sso_provider", "sso_sub", "sso_username", "sso_email", "last_sso_login_at", "created_at", "updated_at"})
+	for _, u := range users {
+		_ = cw.Write([]string{
+			u.ID,
+			u.Name,
+			u.Email,
+			u.Phone,
+			strconv.FormatInt(u.TelegramUserID, 10),
+			strconv.FormatBool(u.Enabled),
+			u.CreatedBy,
+			u.SSOProvider,
+			u.SSOSub,
+			u.SSOUsername,
+			u.SSOEmail,
+			u.LastSSOLoginAt,
+			u.CreatedAt,
+			u.UpdatedAt,
+		})
+	}
+	cw.Flush()
+}
+
+func (a *App) handleUsersImport(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdmin(r) {
+		http.Error(w, "只有超级管理员可以批量导入用户", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/users", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseMultipartForm(20 << 20); err != nil {
+		a.renderError(w, "用户批量导入", "解析上传内容失败: "+err.Error())
+		return
+	}
+	var reader io.Reader
+	file, _, err := r.FormFile("file")
+	if err == nil {
+		defer file.Close()
+		reader = file
+	} else if text := strings.TrimSpace(r.FormValue("csv_text")); text != "" {
+		reader = strings.NewReader(text)
+	} else {
+		a.renderError(w, "用户批量导入", "请上传 CSV 文件或粘贴 CSV 内容")
+		return
+	}
+	imported, updated, err := a.importUsersCSV(reader)
+	if err != nil {
+		a.renderError(w, "用户批量导入", err.Error())
+		return
+	}
+	if summary, err := a.Store.SyncActiveItemsWithLatestShifts(a.Loc); err != nil {
+		log.Printf("sync schedule after user import failed: %v", err)
+	} else if summary.ChangedItems > 0 && a.TG != nil {
+		a.TG.WakeNotificationQueue()
+	}
+	http.Redirect(w, r, fmt.Sprintf("/users?msg=%s", url.QueryEscape(fmt.Sprintf("批量导入完成：新增 %d 个，更新 %d 个", imported, updated))), http.StatusSeeOther)
+}
+
+func (a *App) importUsersCSV(reader io.Reader) (int, int, error) {
+	cr := csv.NewReader(reader)
+	cr.FieldsPerRecord = -1
+	cr.TrimLeadingSpace = true
+	records, err := cr.ReadAll()
+	if err != nil {
+		return 0, 0, fmt.Errorf("读取 CSV 失败: %w", err)
+	}
+	if len(records) < 2 {
+		return 0, 0, fmt.Errorf("CSV 至少需要表头和一行用户数据")
+	}
+	header := map[string]int{}
+	for i, h := range records[0] {
+		header[normalizeUserImportHeader(h)] = i
+	}
+	get := func(row []string, key string) string {
+		idx, ok := header[key]
+		if !ok || idx < 0 || idx >= len(row) {
+			return ""
+		}
+		return strings.TrimSpace(row[idx])
+	}
+	if _, ok := header["name"]; !ok {
+		return 0, 0, fmt.Errorf("CSV 缺少必需表头 name/用户名")
+	}
+
+	users, err := a.Store.LoadUsers()
+	if err != nil {
+		return 0, 0, err
+	}
+	now := time.Now().Format(time.RFC3339)
+	created := 0
+	updated := 0
+	for lineNo, row := range records[1:] {
+		if rowEmpty(row) {
+			continue
+		}
+		name := get(row, "name")
+		if name == "" {
+			return created, updated, fmt.Errorf("第 %d 行缺少用户名 name", lineNo+2)
+		}
+		candidate := StaffUser{
+			ID:             get(row, "id"),
+			Name:           name,
+			Email:          get(row, "email"),
+			Phone:          get(row, "phone"),
+			TelegramUserID: parseFormInt64(get(row, "telegram_user_id")),
+			Enabled:        parseBoolDefault(get(row, "enabled"), true),
+			CreatedBy:      firstNonEmpty(get(row, "created_by"), "import"),
+			SSOProvider:    get(row, "sso_provider"),
+			SSOSub:         get(row, "sso_sub"),
+			SSOUsername:    get(row, "sso_username"),
+			SSOEmail:       get(row, "sso_email"),
+			LastSSOLoginAt: get(row, "last_sso_login_at"),
+			CreatedAt:      firstNonEmpty(get(row, "created_at"), now),
+			UpdatedAt:      now,
+		}
+		idx := findUserForImport(users, candidate)
+		if idx >= 0 {
+			// CSV 导入采用完整字符串匹配后更新，不做包含/前缀/模糊匹配。
+			if candidate.ID == "" {
+				candidate.ID = users[idx].ID
+			}
+			if candidate.CreatedAt == "" {
+				candidate.CreatedAt = users[idx].CreatedAt
+			}
+			if candidate.CreatedBy == "" {
+				candidate.CreatedBy = users[idx].CreatedBy
+			}
+			users[idx] = candidate
+			updated++
+		} else {
+			if candidate.ID == "" {
+				candidate.ID = newID("user")
+			}
+			users = append(users, candidate)
+			created++
+		}
+	}
+	if err := a.Store.SaveUsers(users); err != nil {
+		return created, updated, err
+	}
+	return created, updated, nil
+}
+
+func normalizeUserImportHeader(h string) string {
+	h = strings.TrimSpace(strings.TrimPrefix(h, "\ufeff"))
+	h = strings.ToLower(h)
+	h = strings.ReplaceAll(h, "-", "_")
+	h = strings.ReplaceAll(h, " ", "_")
+	switch h {
+	case "用户名", "姓名", "名称", "name", "user_name", "username":
+		return "name"
+	case "邮箱", "邮件", "email", "mail":
+		return "email"
+	case "电话", "手机号", "手机", "phone", "mobile", "telephone":
+		return "phone"
+	case "telegram", "telegram_id", "telegram_user_id", "tg", "tg_id":
+		return "telegram_user_id"
+	case "启用", "状态", "enabled":
+		return "enabled"
+	case "来源", "created_by", "source":
+		return "created_by"
+	case "sso_provider", "sso_issuer":
+		return "sso_provider"
+	case "sub", "sso_sub":
+		return "sso_sub"
+	case "sso_username", "preferred_username":
+		return "sso_username"
+	case "sso_email":
+		return "sso_email"
+	case "last_sso_login_at":
+		return "last_sso_login_at"
+	case "created_at":
+		return "created_at"
+	case "updated_at":
+		return "updated_at"
+	case "id", "用户id", "用户_id":
+		return "id"
+	default:
+		return h
+	}
+}
+
+func rowEmpty(row []string) bool {
+	for _, v := range row {
+		if strings.TrimSpace(v) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func parseBoolDefault(v string, def bool) bool {
+	v = strings.TrimSpace(strings.ToLower(v))
+	if v == "" {
+		return def
+	}
+	switch v {
+	case "true", "1", "yes", "y", "on", "启用", "是":
+		return true
+	case "false", "0", "no", "n", "off", "禁用", "否":
+		return false
+	default:
+		return def
+	}
+}
+
+func findUserForImport(users []StaffUser, cand StaffUser) int {
+	if strings.TrimSpace(cand.ID) != "" {
+		for i := range users {
+			if sameString(users[i].ID, cand.ID) {
+				return i
+			}
+		}
+	}
+	if strings.TrimSpace(cand.SSOSub) != "" {
+		for i := range users {
+			if sameString(users[i].SSOSub, cand.SSOSub) {
+				return i
+			}
+		}
+	}
+	if strings.TrimSpace(cand.Email) != "" {
+		for i := range users {
+			if sameString(users[i].Email, cand.Email) || sameString(users[i].SSOEmail, cand.Email) {
+				return i
+			}
+		}
+	}
+	if strings.TrimSpace(cand.SSOEmail) != "" {
+		for i := range users {
+			if sameString(users[i].Email, cand.SSOEmail) || sameString(users[i].SSOEmail, cand.SSOEmail) {
+				return i
+			}
+		}
+	}
+	if strings.TrimSpace(cand.SSOUsername) != "" {
+		for i := range users {
+			if sameString(users[i].SSOUsername, cand.SSOUsername) || sameString(users[i].Name, cand.SSOUsername) {
+				return i
+			}
+		}
+	}
+	if strings.TrimSpace(cand.Name) != "" {
+		for i := range users {
+			if sameString(users[i].Name, cand.Name) {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 func (a *App) handleShifts(w http.ResponseWriter, r *http.Request) {
