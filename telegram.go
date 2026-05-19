@@ -410,10 +410,17 @@ func (t *TelegramService) handleCallback(cq *telegramCallbackQuery) {
 			return
 		}
 		if firstRead {
-			t.answerCallback(cq.ID, "已记录已读", false)
-			t.editCallbackMessageMarkup(cq, readDoneMarkup())
+			t.answerCallback(cq.ID, fmt.Sprintf("已记录 %s 已读", rec.StaffName), false)
 		} else {
 			t.answerCallback(cq.ID, fmt.Sprintf("%s 已确认，无需重复点击", rec.StaffName), false)
+		}
+		if strings.TrimSpace(rec.GroupKey) != "" {
+			if records, err := t.Store.LoadNotificationRecordsByGroupKey(rec.GroupKey); err == nil && len(records) > 1 {
+				t.editCallbackMessageMarkup(cq, groupReadMarkup(records))
+			} else {
+				t.editCallbackMessageMarkup(cq, readDoneMarkup())
+			}
+		} else {
 			t.editCallbackMessageMarkup(cq, readDoneMarkup())
 		}
 	default:
@@ -855,12 +862,14 @@ func (t *TelegramService) processNotificationQueue() {
 	}
 	log.Printf("notification queue consuming %d due tasks", len(tasks))
 	for _, task := range tasks {
-		if t.Store.NotificationAlreadySent(task.Key) {
-			record := t.notificationRecordFromTask(task)
-			if record.SentAt == "" {
-				record.SentAt = time.Now().Format(time.RFC3339)
+		if t.notificationTaskAlreadySent(task) {
+			records := t.notificationRecordsFromTask(task)
+			for i := range records {
+				if records[i].SentAt == "" {
+					records[i].SentAt = time.Now().Format(time.RFC3339)
+				}
 			}
-			if err := t.Store.CompleteNotificationTaskSent(task.ID, record); err != nil {
+			if err := t.Store.CompleteNotificationTaskSentRecords(task.ID, records); err != nil {
 				log.Printf("mark duplicate notification task sent failed task=%s: %v", task.ID, err)
 			}
 			continue
@@ -870,41 +879,92 @@ func (t *TelegramService) processNotificationQueue() {
 			_ = t.Store.FailNotificationTask(task.ID, err, time.Now().Add(300*time.Second))
 			continue
 		}
-		record := t.notificationRecordFromTask(task)
-		record.SentAt = time.Now().Format(time.RFC3339)
-		if err := t.Store.CompleteNotificationTaskSent(task.ID, record); err != nil {
+		records := t.notificationRecordsFromTask(task)
+		sentAt := time.Now().Format(time.RFC3339)
+		for i := range records {
+			records[i].SentAt = sentAt
+		}
+		if err := t.Store.CompleteNotificationTaskSentRecords(task.ID, records); err != nil {
 			log.Printf("complete notification task failed task=%s: %v", task.ID, err)
 			_ = t.Store.FailNotificationTask(task.ID, err, time.Now().Add(300*time.Second))
 		}
 	}
 }
 
-func (t *TelegramService) notificationRecordFromTask(task NotificationTask) NotificationRecord {
-	item := task.Item
-	return NotificationRecord{
-		ID:             hashID("ntf", task.Key),
-		Key:            task.Key,
-		ItemKey:        notificationItemKey(item),
-		Date:           item.Date,
-		StaffID:        item.StaffID,
-		StaffName:      item.StaffName,
-		StaffPhone:     strings.TrimSpace(item.StaffPhone),
-		ShiftCode:      item.ShiftCode,
-		ShiftName:      item.ShiftName,
-		TelegramUserID: item.TelegramUserID,
-		ChatID:         task.ChatID,
+func (t *TelegramService) notificationTaskItems(task NotificationTask) []ScheduleItem {
+	if len(task.Items) > 0 {
+		return task.Items
 	}
+	if task.Item.StaffID != "" {
+		return []ScheduleItem{task.Item}
+	}
+	return nil
+}
+
+func (t *TelegramService) notificationTaskAlreadySent(task NotificationTask) bool {
+	items := t.notificationTaskItems(task)
+	if len(items) == 0 {
+		return t.Store.NotificationAlreadySent(task.Key)
+	}
+	for _, item := range items {
+		if !t.Store.NotificationAlreadySent(notificationKey(item, task.ChatID)) {
+			return false
+		}
+	}
+	return true
+}
+
+func (t *TelegramService) notificationRecordsFromTask(task NotificationTask) []NotificationRecord {
+	items := t.notificationTaskItems(task)
+	records := make([]NotificationRecord, 0, len(items))
+	groupKey := task.ScheduleKey
+	if groupKey == "" {
+		groupKey = task.ID
+	}
+	for _, item := range items {
+		records = append(records, NotificationRecord{
+			ID:             hashID("ntf", notificationKey(item, task.ChatID)),
+			Key:            notificationKey(item, task.ChatID),
+			ItemKey:        notificationItemKey(item),
+			Date:           item.Date,
+			StaffID:        item.StaffID,
+			StaffName:      item.StaffName,
+			StaffPhone:     strings.TrimSpace(item.StaffPhone),
+			GroupKey:       groupKey,
+			GroupID:        task.GroupID,
+			GroupName:      task.GroupName,
+			ShiftCode:      item.ShiftCode,
+			ShiftName:      item.ShiftName,
+			TelegramUserID: item.TelegramUserID,
+			ChatID:         task.ChatID,
+		})
+	}
+	return records
+}
+
+func (t *TelegramService) notificationRecordFromTask(task NotificationTask) NotificationRecord {
+	records := t.notificationRecordsFromTask(task)
+	if len(records) == 0 {
+		return NotificationRecord{}
+	}
+	return records[0]
 }
 
 func (t *TelegramService) sendReminderTask(task NotificationTask) error {
-	item := task.Item
-	if !shiftNeedsNotification(item) {
-		return fmt.Errorf("班次无需通知: %s", item.ShiftCode)
+	items := t.notificationTaskItems(task)
+	if len(items) == 0 {
+		return fmt.Errorf("通知任务没有排班明细")
 	}
-	mention := html.EscapeString(item.StaffName)
-	if item.TelegramUserID > 0 {
-		mention = fmt.Sprintf("<a href=\"tg://user?id=%d\">%s</a>", item.TelegramUserID, html.EscapeString(item.StaffName))
+	for _, item := range items {
+		if !shiftNeedsNotification(item) {
+			return fmt.Errorf("班次无需通知: %s", item.ShiftCode)
+		}
 	}
+	if len(items) > 1 {
+		return t.sendGroupedReminderTask(task, items)
+	}
+	item := items[0]
+	mention := t.staffMention(item)
 	body := fmt.Sprintf("⏰ <b>工作提醒</b>\n\n员工: %s\n日期: %s\n班次: %s\n时间: %s", mention, html.EscapeString(dateWithWeekday(item.Date, t.Loc)), html.EscapeString(item.ShiftName), html.EscapeString(formatClock(item.StartTime)))
 	if strings.TrimSpace(item.StaffPhone) != "" {
 		body += fmt.Sprintf("\n电话: %s", html.EscapeString(strings.TrimSpace(item.StaffPhone)))
@@ -914,9 +974,65 @@ func (t *TelegramService) sendReminderTask(task NotificationTask) error {
 	}
 	footer := t.reminderFooter(item)
 	body += "\n\n" + footer
-	recordID := hashID("ntf", task.Key)
+	recordID := hashID("ntf", notificationKey(item, task.ChatID))
 	replyMarkup := map[string]any{"inline_keyboard": [][]map[string]string{{{"text": "我已读", "callback_data": "read:" + recordID}}}}
 	return t.sendMessageWithMarkup(task.ChatID, t.getThreadID(task.ChatID, 0), body, "HTML", replyMarkup)
+}
+
+func (t *TelegramService) sendGroupedReminderTask(task NotificationTask, items []ScheduleItem) error {
+	sort.Slice(items, func(i, j int) bool { return items[i].StaffName < items[j].StaffName })
+	first := items[0]
+	var b strings.Builder
+	b.WriteString("⏰ <b>工作提醒</b>\n")
+	if strings.TrimSpace(task.GroupName) != "" {
+		b.WriteString(fmt.Sprintf("分组: %s\n", html.EscapeString(task.GroupName)))
+	}
+	b.WriteString(fmt.Sprintf("日期: %s\n\n", html.EscapeString(dateWithWeekday(first.Date, t.Loc))))
+	b.WriteString("员工:\n")
+	for _, item := range items {
+		line := t.staffMention(item)
+		if strings.TrimSpace(item.StaffPhone) != "" {
+			line += fmt.Sprintf("    ☎️ %s", html.EscapeString(strings.TrimSpace(item.StaffPhone)))
+		}
+		b.WriteString(line + "\n")
+	}
+	b.WriteString(fmt.Sprintf("班次: %s\n时间: %s", html.EscapeString(first.ShiftName), html.EscapeString(formatClock(first.StartTime))))
+	if strings.TrimSpace(t.Cfg.WorkOrderURL) != "" {
+		b.WriteString(fmt.Sprintf("\n\n排班工单: %s", html.EscapeString(strings.TrimSpace(t.Cfg.WorkOrderURL))))
+	}
+	b.WriteString("\n\n" + t.reminderFooter(first))
+	records := t.notificationRecordsFromTask(task)
+	return t.sendMessageWithMarkup(task.ChatID, t.getThreadID(task.ChatID, 0), b.String(), "HTML", groupReadMarkup(records))
+}
+
+func (t *TelegramService) staffMention(item ScheduleItem) string {
+	mention := html.EscapeString(item.StaffName)
+	if item.TelegramUserID > 0 {
+		mention = fmt.Sprintf("<a href=\"tg://user?id=%d\">%s</a>", item.TelegramUserID, html.EscapeString(item.StaffName))
+	}
+	return mention
+}
+
+func groupReadMarkup(records []NotificationRecord) any {
+	if len(records) == 0 {
+		return readDoneMarkup()
+	}
+	rows := [][]map[string]string{}
+	allRead := true
+	for _, rec := range records {
+		if rec.ReadAt == "" {
+			allRead = false
+		}
+		label := "我已读 " + rec.StaffName
+		if rec.ReadAt != "" {
+			label = "✅ " + rec.StaffName
+		}
+		rows = append(rows, []map[string]string{{"text": label, "callback_data": "read:" + rec.ID}})
+	}
+	if allRead {
+		return map[string]any{"inline_keyboard": [][]map[string]string{{{"text": "✅ 全部已读", "callback_data": "noop:read"}}}}
+	}
+	return map[string]any{"inline_keyboard": rows}
 }
 
 func (t *TelegramService) reminderFooter(item ScheduleItem) string {

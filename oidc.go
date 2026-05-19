@@ -258,6 +258,9 @@ func (a *App) syncSSOStaffUser(claims map[string]any, identity AuthIdentity) (St
 		if strings.TrimSpace(users[match].CreatedBy) == "" {
 			users[match].CreatedBy = "sso"
 		}
+		if strings.TrimSpace(users[match].GroupID) == "" {
+			users[match].GroupID = DefaultUserGroupID
+		}
 		if err := a.Store.SaveUsers(users); err != nil {
 			return StaffUser{}, err
 		}
@@ -267,6 +270,7 @@ func (a *App) syncSSOStaffUser(claims map[string]any, identity AuthIdentity) (St
 		ID:             newID("user"),
 		Name:           name,
 		Email:          email,
+		GroupID:        DefaultUserGroupID,
 		Enabled:        true,
 		CreatedBy:      "sso",
 		SSOProvider:    strings.TrimSpace(a.effectiveSSOSettings().IssuerURL),

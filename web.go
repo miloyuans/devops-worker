@@ -145,6 +145,9 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/users/delete", a.handleUserDelete)
 	mux.HandleFunc("/users/export", a.handleUsersExport)
 	mux.HandleFunc("/users/import", a.handleUsersImport)
+	mux.HandleFunc("/groups/create", a.handleGroupCreate)
+	mux.HandleFunc("/groups/update", a.handleGroupUpdate)
+	mux.HandleFunc("/groups/delete", a.handleGroupDelete)
 	mux.HandleFunc("/shifts", a.handleShifts)
 	mux.HandleFunc("/shifts/create", a.handleShiftCreate)
 	mux.HandleFunc("/shifts/update", a.handleShiftUpdate)
@@ -333,6 +336,7 @@ func (a *App) basePage(r *http.Request, title string) PageData {
 	cfg.Timezone = tz
 	role := a.role(r)
 	identity, authenticated := a.identity(r)
+	groups, _ := a.Store.LoadUserGroups()
 	return PageData{
 		Title:             title,
 		Role:              role,
@@ -341,6 +345,7 @@ func (a *App) basePage(r *http.Request, title string) PageData {
 		CurrentUserName:   identity.Name,
 		CurrentUserEmail:  identity.Email,
 		CurrentUserSource: identity.Source,
+		Groups:            groups,
 		Config:            cfg,
 		NowYear:           now.Year(),
 		NowMonth:          int(now.Month()),
@@ -409,6 +414,7 @@ func (a *App) handleUsers(w http.ResponseWriter, r *http.Request) {
 	} else {
 		data.Users = users
 	}
+	data.Groups, _ = a.Store.LoadUserGroups()
 	a.render(w, "users", data)
 }
 
@@ -425,10 +431,14 @@ func (a *App) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	email := strings.TrimSpace(r.FormValue("email"))
 	phone := strings.TrimSpace(r.FormValue("phone"))
+	groupID := strings.TrimSpace(r.FormValue("group_id"))
+	if groupID == "" {
+		groupID = DefaultUserGroupID
+	}
 	tgID := parseFormInt64(r.FormValue("telegram_user_id"))
 	users, _ := a.Store.LoadUsers()
 	now := time.Now().Format(time.RFC3339)
-	users = append(users, StaffUser{ID: newID("user"), Name: name, Email: email, Phone: phone, TelegramUserID: tgID, Enabled: true, CreatedBy: a.role(r), CreatedAt: now, UpdatedAt: now})
+	users = append(users, StaffUser{ID: newID("user"), Name: name, Email: email, Phone: phone, GroupID: groupID, TelegramUserID: tgID, Enabled: true, CreatedBy: a.role(r), CreatedAt: now, UpdatedAt: now})
 	if err := a.Store.SaveUsers(users); err != nil {
 		log.Printf("save user error: %v", err)
 	}
@@ -454,6 +464,10 @@ func (a *App) handleUserUpdate(w http.ResponseWriter, r *http.Request) {
 			users[i].Name = strings.TrimSpace(r.FormValue("name"))
 			users[i].Email = strings.TrimSpace(r.FormValue("email"))
 			users[i].Phone = strings.TrimSpace(r.FormValue("phone"))
+			users[i].GroupID = strings.TrimSpace(r.FormValue("group_id"))
+			if users[i].GroupID == "" {
+				users[i].GroupID = DefaultUserGroupID
+			}
 			users[i].TelegramUserID = parseFormInt64(r.FormValue("telegram_user_id"))
 			users[i].Enabled = r.FormValue("enabled") == "true"
 			users[i].UpdatedAt = time.Now().Format(time.RFC3339)
@@ -527,6 +541,128 @@ func (a *App) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/users", http.StatusSeeOther)
 }
 
+func (a *App) handleGroupCreate(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdmin(r) {
+		http.Error(w, "只有超级管理员可以管理分组", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/users", http.StatusSeeOther)
+		return
+	}
+	_ = r.ParseForm()
+	name := strings.TrimSpace(r.FormValue("name"))
+	if name == "" {
+		http.Redirect(w, r, "/users", http.StatusSeeOther)
+		return
+	}
+	groups, _ := a.Store.LoadUserGroups()
+	now := time.Now().Format(time.RFC3339)
+	id := strings.TrimSpace(r.FormValue("id"))
+	if id == "" {
+		id = sanitizeGroupID(name)
+	}
+	if id == "" || groupIDExists(groups, id) {
+		id = newID("grp")
+	}
+	groups = append(groups, UserGroup{ID: id, Name: name, Enabled: true, CreatedBy: "admin", CreatedAt: now, UpdatedAt: now})
+	if err := a.Store.SaveUserGroups(groups); err != nil {
+		log.Printf("save group error: %v", err)
+	}
+	http.Redirect(w, r, "/users", http.StatusSeeOther)
+}
+
+func (a *App) handleGroupUpdate(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdmin(r) {
+		http.Error(w, "只有超级管理员可以管理分组", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/users", http.StatusSeeOther)
+		return
+	}
+	_ = r.ParseForm()
+	id := strings.TrimSpace(r.FormValue("id"))
+	groups, _ := a.Store.LoadUserGroups()
+	for i := range groups {
+		if groups[i].ID == id {
+			groups[i].Name = strings.TrimSpace(r.FormValue("name"))
+			if groups[i].Name == "" {
+				groups[i].Name = groups[i].ID
+			}
+			groups[i].Enabled = r.FormValue("enabled") == "true"
+			groups[i].UpdatedAt = time.Now().Format(time.RFC3339)
+		}
+	}
+	if err := a.Store.SaveUserGroups(groups); err != nil {
+		log.Printf("update group error: %v", err)
+	}
+	go func() {
+		if summary, err := a.Store.SyncActiveItemsWithLatestShifts(a.Loc); err != nil {
+			log.Printf("sync after group update failed: %v", err)
+		} else if summary.ChangedItems > 0 && a.TG != nil {
+			a.TG.WakeNotificationQueue()
+		}
+	}()
+	http.Redirect(w, r, "/users", http.StatusSeeOther)
+}
+
+func (a *App) handleGroupDelete(w http.ResponseWriter, r *http.Request) {
+	if !a.isAdmin(r) {
+		http.Error(w, "只有超级管理员可以管理分组", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/users", http.StatusSeeOther)
+		return
+	}
+	_ = r.ParseForm()
+	id := strings.TrimSpace(r.FormValue("id"))
+	if id == DefaultUserGroupID {
+		http.Redirect(w, r, "/users?msg="+url.QueryEscape("默认 devops 分组不能彻底删除，只能禁用/启用"), http.StatusSeeOther)
+		return
+	}
+	groups, _ := a.Store.LoadUserGroups()
+	out := make([]UserGroup, 0, len(groups))
+	for _, g := range groups {
+		if g.ID != id {
+			out = append(out, g)
+			continue
+		}
+		if g.Enabled {
+			g.Enabled = false
+			g.UpdatedAt = time.Now().Format(time.RFC3339)
+			out = append(out, g)
+		}
+	}
+	if err := a.Store.SaveUserGroups(out); err != nil {
+		log.Printf("delete group error: %v", err)
+	}
+	http.Redirect(w, r, "/users", http.StatusSeeOther)
+}
+
+func groupIDExists(groups []UserGroup, id string) bool {
+	for _, g := range groups {
+		if strings.EqualFold(g.ID, id) {
+			return true
+		}
+	}
+	return false
+}
+
+func sanitizeGroupID(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		} else if r == ' ' || r == '.' || r == '/' {
+			b.WriteRune('-')
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
 func (a *App) handleUsersExport(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdmin(r) {
 		http.Error(w, "只有超级管理员可以导出用户", http.StatusForbidden)
@@ -541,13 +677,14 @@ func (a *App) handleUsersExport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="devops-worker-users.csv"`)
 	_, _ = w.Write([]byte("\ufeff"))
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{"id", "name", "email", "phone", "telegram_user_id", "enabled", "created_by", "sso_provider", "sso_sub", "sso_username", "sso_email", "last_sso_login_at", "created_at", "updated_at"})
+	_ = cw.Write([]string{"id", "name", "email", "phone", "group_id", "telegram_user_id", "enabled", "created_by", "sso_provider", "sso_sub", "sso_username", "sso_email", "last_sso_login_at", "created_at", "updated_at"})
 	for _, u := range users {
 		_ = cw.Write([]string{
 			u.ID,
 			u.Name,
 			u.Email,
 			u.Phone,
+			u.GroupID,
 			strconv.FormatInt(u.TelegramUserID, 10),
 			strconv.FormatBool(u.Enabled),
 			u.CreatedBy,
@@ -697,6 +834,8 @@ func normalizeUserImportHeader(h string) string {
 		return "email"
 	case "电话", "手机号", "手机", "phone", "mobile", "telephone":
 		return "phone"
+	case "分组", "用户组", "group", "group_id", "user_group":
+		return "group_id"
 	case "telegram", "telegram_id", "telegram_user_id", "tg", "tg_id":
 		return "telegram_user_id"
 	case "启用", "状态", "enabled":

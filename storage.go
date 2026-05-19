@@ -34,6 +34,9 @@ func (s *Storage) Init() error {
 	if err := s.ensureDefaultShifts(); err != nil {
 		return err
 	}
+	if err := s.ensureDefaultUserGroups(); err != nil {
+		return err
+	}
 	if err := s.ensureDefaultUsers(); err != nil {
 		return err
 	}
@@ -114,6 +117,47 @@ func (s *Storage) ensureDefaultShifts() error {
 	return writeJSONAtomic(path, ShiftConfig{Shifts: defaults})
 }
 
+const DefaultUserGroupID = "devops"
+
+func defaultUserGroup() UserGroup {
+	now := time.Now().Format(time.RFC3339)
+	return UserGroup{ID: DefaultUserGroupID, Name: "devops", Enabled: true, CreatedBy: "system", CreatedAt: now, UpdatedAt: now}
+}
+
+func (s *Storage) ensureDefaultUserGroups() error {
+	path := filepath.Join(s.Dir, "users", "groups.json")
+	if !fileExists(path) {
+		return writeJSONAtomic(path, UserGroupDB{Groups: []UserGroup{defaultUserGroup()}})
+	}
+	var db UserGroupDB
+	if err := readJSON(path, &db); err != nil {
+		return err
+	}
+	changed := false
+	seen := false
+	for i := range db.Groups {
+		if db.Groups[i].ID == DefaultUserGroupID {
+			seen = true
+			if strings.TrimSpace(db.Groups[i].Name) == "" {
+				db.Groups[i].Name = "devops"
+				changed = true
+			}
+			if strings.TrimSpace(db.Groups[i].CreatedBy) == "" {
+				db.Groups[i].CreatedBy = "system"
+				changed = true
+			}
+		}
+	}
+	if !seen {
+		db.Groups = append([]UserGroup{defaultUserGroup()}, db.Groups...)
+		changed = true
+	}
+	if changed {
+		return writeJSONAtomic(path, db)
+	}
+	return nil
+}
+
 func (s *Storage) ensureDefaultUsers() error {
 	path := filepath.Join(s.Dir, "users", "users.json")
 	if fileExists(path) {
@@ -125,6 +169,10 @@ func (s *Storage) ensureDefaultUsers() error {
 		for i := range db.Users {
 			if db.Users[i].CreatedBy == "" {
 				db.Users[i].CreatedBy = "admin"
+				changed = true
+			}
+			if strings.TrimSpace(db.Users[i].GroupID) == "" {
+				db.Users[i].GroupID = DefaultUserGroupID
 				changed = true
 			}
 		}
@@ -266,10 +314,35 @@ func (s *Storage) SaveShifts(shifts []Shift) error {
 	})
 }
 
+func (s *Storage) LoadUserGroups() ([]UserGroup, error) {
+	var db UserGroupDB
+	if err := readJSON(filepath.Join(s.Dir, "users", "groups.json"), &db); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return []UserGroup{defaultUserGroup()}, nil
+		}
+		return nil, err
+	}
+	if len(db.Groups) == 0 {
+		return []UserGroup{defaultUserGroup()}, nil
+	}
+	return db.Groups, nil
+}
+
+func (s *Storage) SaveUserGroups(groups []UserGroup) error {
+	return s.WithLock(func() error {
+		return writeJSONAtomic(filepath.Join(s.Dir, "users", "groups.json"), UserGroupDB{Groups: groups})
+	})
+}
+
 func (s *Storage) LoadUsers() ([]StaffUser, error) {
 	var db UserDB
 	if err := readJSON(filepath.Join(s.Dir, "users", "users.json"), &db); err != nil {
 		return nil, err
+	}
+	for i := range db.Users {
+		if strings.TrimSpace(db.Users[i].GroupID) == "" {
+			db.Users[i].GroupID = DefaultUserGroupID
+		}
 	}
 	return db.Users, nil
 }
@@ -795,6 +868,16 @@ func (s *Storage) SyncNotificationTasks(active ActiveSchedule, chatIDs []int64, 
 	if loc == nil {
 		loc = time.Local
 	}
+	type desiredTask struct {
+		ScheduleKey string
+		Key         string
+		ItemKey     string
+		ChatID      int64
+		GroupID     string
+		GroupName   string
+		RunAt       string
+		Items       []ScheduleItem
+	}
 	err = s.WithLock(func() error {
 		tasksPath := filepath.Join(s.Dir, "meta", "notification_tasks.json")
 		state := NotificationTaskState{Tasks: []NotificationTask{}}
@@ -810,22 +893,38 @@ func (s *Storage) SyncNotificationTasks(active ActiveSchedule, chatIDs []int64, 
 			sentByKey[rec.Key] = true
 		}
 
+		users, _ := s.LoadUsers()
+		userMap := map[string]StaffUser{}
+		for _, u := range users {
+			if strings.TrimSpace(u.GroupID) == "" {
+				u.GroupID = DefaultUserGroupID
+			}
+			userMap[u.ID] = u
+		}
+		groups, _ := s.LoadUserGroups()
+		groupMap := map[string]UserGroup{}
+		for _, g := range groups {
+			if g.ID != "" {
+				groupMap[g.ID] = g
+			}
+		}
+
 		now := time.Now().In(loc)
 		nowStr := time.Now().Format(time.RFC3339)
 
-		// schedule_key is stable per date+staff+chat, so pending tasks can be
-		// refreshed when shift_code/start_time changes instead of leaving stale
-		// pending tasks behind.  Legacy tasks without schedule_key are mapped from
-		// their embedded item for backward compatibility.
-		//
-		// Keep sent tasks in a separate index.  A queue refresh must never create a
-		// new pending task for a schedule that has already been sent; otherwise an
-		// unchanged schedule could be notified again after SyncNotificationTasks runs.
 		byScheduleKey := map[string]int{}
 		sentTaskByScheduleKey := map[string]int{}
 		for i := range state.Tasks {
+			if len(state.Tasks[i].Items) == 0 && state.Tasks[i].Item.StaffID != "" {
+				state.Tasks[i].Items = []ScheduleItem{state.Tasks[i].Item}
+			}
 			if strings.TrimSpace(state.Tasks[i].ScheduleKey) == "" {
-				state.Tasks[i].ScheduleKey = notificationScheduleKey(state.Tasks[i].Item, state.Tasks[i].ChatID)
+				if len(state.Tasks[i].Items) > 1 && strings.TrimSpace(state.Tasks[i].GroupID) != "" {
+					first := state.Tasks[i].Items[0]
+					state.Tasks[i].ScheduleKey = notificationGroupScheduleKey(first.Date, state.Tasks[i].GroupID, first.ShiftCode, state.Tasks[i].ChatID)
+				} else {
+					state.Tasks[i].ScheduleKey = notificationScheduleKey(state.Tasks[i].Item, state.Tasks[i].ChatID)
+				}
 			}
 			if state.Tasks[i].ScheduleKey == "" {
 				continue
@@ -840,8 +939,9 @@ func (s *Storage) SyncNotificationTasks(active ActiveSchedule, chatIDs []int64, 
 			}
 		}
 
-		activeScheduleKeys := map[string]bool{}
-		for _, item := range NormalizeScheduleItems(active.Items) {
+		agg := map[string]*desiredTask{}
+		for _, raw := range NormalizeScheduleItems(active.Items) {
+			item := raw
 			if !shiftNeedsNotification(item) {
 				continue
 			}
@@ -849,93 +949,127 @@ func (s *Storage) SyncNotificationTasks(active ActiveSchedule, chatIDs []int64, 
 			if parseErr != nil {
 				continue
 			}
+			if !start.In(loc).After(now) {
+				continue
+			}
+			if u, ok := userMap[item.StaffID]; ok {
+				if strings.TrimSpace(item.StaffGroupID) == "" {
+					item.StaffGroupID = strings.TrimSpace(u.GroupID)
+					if item.StaffGroupID == "" {
+						item.StaffGroupID = DefaultUserGroupID
+					}
+				}
+				if strings.TrimSpace(item.StaffGroupName) == "" {
+					item.StaffGroupName = item.StaffGroupID
+				}
+			}
+			if g, ok := groupMap[item.StaffGroupID]; ok && strings.TrimSpace(g.Name) != "" {
+				item.StaffGroupName = g.Name
+			}
+
 			for _, chatID := range chatIDs {
 				if chatID == 0 {
 					continue
 				}
+				groupID := strings.TrimSpace(item.StaffGroupID)
+				groupName := strings.TrimSpace(item.StaffGroupName)
+				mergeGroup := false
+				if groupID != "" {
+					if g, ok := groupMap[groupID]; ok && g.Enabled {
+						mergeGroup = true
+						if strings.TrimSpace(g.Name) != "" {
+							groupName = g.Name
+						}
+					}
+				}
 				scheduleKey := notificationScheduleKey(item, chatID)
-				key := notificationKey(item, chatID)
-				activeScheduleKeys[scheduleKey] = true
-				runAt := start.In(loc).Add(-30 * time.Minute)
-				runAtStr := runAt.Format(time.RFC3339)
-
-				if idx, ok := byScheduleKey[scheduleKey]; ok {
-					if sentByKey[key] {
-						// This exact notification was already recorded as sent.  Mark the
-						// still-open task complete instead of trying to send it again.
-						state.Tasks[idx].Status = "sent"
-						state.Tasks[idx].Key = key
-						state.Tasks[idx].ScheduleKey = scheduleKey
-						state.Tasks[idx].ItemKey = notificationItemKey(item)
-						state.Tasks[idx].Item = item
-						if state.Tasks[idx].SentAt == "" {
-							state.Tasks[idx].SentAt = nowStr
-						}
-						state.Tasks[idx].UpdatedAt = nowStr
-						continue
-					}
-					if state.Tasks[idx].Status == "sent" || state.Tasks[idx].Status == "cancelled" {
-						continue
-					}
-
-					oldKey := state.Tasks[idx].Key
-					oldRunAt := state.Tasks[idx].RunAt
-					oldItemKey := state.Tasks[idx].ItemKey
-					state.Tasks[idx].Key = key
-					state.Tasks[idx].ScheduleKey = scheduleKey
-					state.Tasks[idx].ItemKey = notificationItemKey(item)
-					state.Tasks[idx].Item = item
-					state.Tasks[idx].RunAt = runAtStr
-					// Always align retry eligibility with the latest run_at. If the new
-					// run_at is already in the past but the shift has not started yet, the
-					// task is consumed immediately in this same queue cycle.
-					state.Tasks[idx].NextAttemptAt = runAtStr
-					state.Tasks[idx].UpdatedAt = nowStr
-					if oldKey != key || oldRunAt != runAtStr || oldItemKey != state.Tasks[idx].ItemKey {
-						refreshed++
-						if state.Tasks[idx].Status == "sending" {
-							state.Tasks[idx].Status = "retry"
-						}
-					}
-					continue
+				if mergeGroup {
+					scheduleKey = notificationGroupScheduleKey(item.Date, groupID, item.ShiftCode, chatID)
 				}
-
-				// If this exact notification was already sent, or if this date+staff+chat
-				// schedule has already been notified once, do not create a new pending
-				// task during queue refresh.  Shift-change notifications should be a
-				// separate business flow; the regular 30-minute reminder is one-shot.
-				if sentByKey[key] {
-					continue
+				dt := agg[scheduleKey]
+				if dt == nil {
+					runAt := start.In(loc).Add(-30 * time.Minute).Format(time.RFC3339)
+					dt = &desiredTask{ScheduleKey: scheduleKey, ChatID: chatID, GroupID: groupID, GroupName: groupName, RunAt: runAt, Items: []ScheduleItem{}}
+					agg[scheduleKey] = dt
 				}
-				if sentIdx, ok := sentTaskByScheduleKey[scheduleKey]; ok {
-					state.Tasks[sentIdx].UpdatedAt = nowStr
-					continue
+				dt.Items = append(dt.Items, item)
+				if start.In(loc).Add(-30 * time.Minute).Before(parseRFC3339Or(dt.RunAt, start.In(loc)).In(loc)) {
+					dt.RunAt = start.In(loc).Add(-30 * time.Minute).Format(time.RFC3339)
 				}
-
-				// Do not create brand-new tasks for shifts that already started.  If
-				// run_at is in the past but the shift is still in the future, create the
-				// task anyway so it can be consumed immediately.
-				if !start.In(loc).After(now) {
-					continue
-				}
-				createdAt := nowStr
-				task := NotificationTask{
-					ID:            hashID("tsk", scheduleKey),
-					Key:           key,
-					ScheduleKey:   scheduleKey,
-					ItemKey:       notificationItemKey(item),
-					Status:        "pending",
-					ChatID:        chatID,
-					RunAt:         runAtStr,
-					NextAttemptAt: runAtStr,
-					CreatedAt:     createdAt,
-					UpdatedAt:     createdAt,
-					Item:          item,
-				}
-				state.Tasks = append(state.Tasks, task)
-				byScheduleKey[scheduleKey] = len(state.Tasks) - 1
-				created++
 			}
+		}
+
+		activeScheduleKeys := map[string]bool{}
+		for scheduleKey, dt := range agg {
+			sort.Slice(dt.Items, func(i, j int) bool {
+				if dt.Items[i].StartTime != dt.Items[j].StartTime {
+					return dt.Items[i].StartTime < dt.Items[j].StartTime
+				}
+				return dt.Items[i].StaffName < dt.Items[j].StaffName
+			})
+			dt.ItemKey = notificationTaskItemKey(dt.Items)
+			dt.Key = notificationTaskKey(scheduleKey, dt.Items)
+			activeScheduleKeys[scheduleKey] = true
+
+			allSent := true
+			for _, item := range dt.Items {
+				if !sentByKey[notificationKey(item, dt.ChatID)] {
+					allSent = false
+					break
+				}
+			}
+
+			if idx, ok := byScheduleKey[scheduleKey]; ok {
+				if allSent {
+					state.Tasks[idx].Status = "sent"
+					state.Tasks[idx].Key = dt.Key
+					state.Tasks[idx].ItemKey = dt.ItemKey
+					state.Tasks[idx].Item = dt.Items[0]
+					state.Tasks[idx].Items = dt.Items
+					state.Tasks[idx].GroupID = dt.GroupID
+					state.Tasks[idx].GroupName = dt.GroupName
+					if state.Tasks[idx].SentAt == "" {
+						state.Tasks[idx].SentAt = nowStr
+					}
+					state.Tasks[idx].UpdatedAt = nowStr
+					continue
+				}
+				if state.Tasks[idx].Status == "sent" || state.Tasks[idx].Status == "cancelled" {
+					continue
+				}
+				oldKey := state.Tasks[idx].Key
+				oldRunAt := state.Tasks[idx].RunAt
+				oldItemKey := state.Tasks[idx].ItemKey
+				state.Tasks[idx].Key = dt.Key
+				state.Tasks[idx].ScheduleKey = scheduleKey
+				state.Tasks[idx].ItemKey = dt.ItemKey
+				state.Tasks[idx].Item = dt.Items[0]
+				state.Tasks[idx].Items = dt.Items
+				state.Tasks[idx].GroupID = dt.GroupID
+				state.Tasks[idx].GroupName = dt.GroupName
+				state.Tasks[idx].RunAt = dt.RunAt
+				state.Tasks[idx].NextAttemptAt = dt.RunAt
+				state.Tasks[idx].UpdatedAt = nowStr
+				if oldKey != dt.Key || oldRunAt != dt.RunAt || oldItemKey != dt.ItemKey {
+					refreshed++
+					if state.Tasks[idx].Status == "sending" {
+						state.Tasks[idx].Status = "retry"
+					}
+				}
+				continue
+			}
+
+			if allSent {
+				continue
+			}
+			if sentIdx, ok := sentTaskByScheduleKey[scheduleKey]; ok {
+				state.Tasks[sentIdx].UpdatedAt = nowStr
+				continue
+			}
+			task := NotificationTask{ID: hashID("tsk", scheduleKey), Key: dt.Key, ScheduleKey: scheduleKey, ItemKey: dt.ItemKey, Status: "pending", ChatID: dt.ChatID, GroupID: dt.GroupID, GroupName: dt.GroupName, RunAt: dt.RunAt, NextAttemptAt: dt.RunAt, CreatedAt: nowStr, UpdatedAt: nowStr, Item: dt.Items[0], Items: dt.Items}
+			state.Tasks = append(state.Tasks, task)
+			byScheduleKey[scheduleKey] = len(state.Tasks) - 1
+			created++
 		}
 
 		for i := range state.Tasks {
@@ -954,6 +1088,13 @@ func (s *Storage) SyncNotificationTasks(active ActiveSchedule, chatIDs []int64, 
 		return writeJSONAtomic(tasksPath, state)
 	})
 	return created, cancelled, refreshed, err
+}
+
+func parseRFC3339Or(s string, fallback time.Time) time.Time {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	return fallback
 }
 
 func (s *Storage) TodayNotificationTasksComplete(loc *time.Location) (complete bool, total int, open int, err error) {
@@ -1052,6 +1193,10 @@ func (s *Storage) ClaimDueNotificationTasks(now time.Time, limit int) ([]Notific
 }
 
 func (s *Storage) CompleteNotificationTaskSent(taskID string, record NotificationRecord) error {
+	return s.CompleteNotificationTaskSentRecords(taskID, []NotificationRecord{record})
+}
+
+func (s *Storage) CompleteNotificationTaskSentRecords(taskID string, records []NotificationRecord) error {
 	return s.WithLock(func() error {
 		tasksPath := filepath.Join(s.Dir, "meta", "notification_tasks.json")
 		state := NotificationTaskState{Tasks: []NotificationTask{}}
@@ -1072,24 +1217,30 @@ func (s *Storage) CompleteNotificationTaskSent(taskID string, record Notificatio
 			return fmt.Errorf("通知任务不存在: %s", taskID)
 		}
 
-		if record.SentAt == "" {
-			record.SentAt = now
-		}
 		notificationsPath := filepath.Join(s.Dir, "meta", "notifications.json")
 		notifications := NotificationState{Records: []NotificationRecord{}}
 		_ = readJSON(notificationsPath, &notifications)
-		exists := false
+		existing := map[string]bool{}
 		for _, rec := range notifications.Records {
-			if rec.Key == record.Key {
-				exists = true
-				break
+			existing[rec.Key] = true
+		}
+		for _, record := range records {
+			if record.Key == "" {
+				continue
+			}
+			if record.SentAt == "" {
+				record.SentAt = now
+			}
+			if record.GroupKey == "" {
+				record.GroupKey = taskID
+			}
+			if !existing[record.Key] {
+				notifications.Records = append(notifications.Records, record)
+				existing[record.Key] = true
 			}
 		}
-		if !exists {
-			notifications.Records = append(notifications.Records, record)
-			if err := writeJSONAtomic(notificationsPath, notifications); err != nil {
-				return err
-			}
+		if err := writeJSONAtomic(notificationsPath, notifications); err != nil {
+			return err
 		}
 
 		for i := range state.Tasks {
@@ -1097,13 +1248,28 @@ func (s *Storage) CompleteNotificationTaskSent(taskID string, record Notificatio
 				continue
 			}
 			state.Tasks[i].Status = "sent"
-			state.Tasks[i].SentAt = record.SentAt
+			state.Tasks[i].SentAt = now
 			state.Tasks[i].LastError = ""
 			state.Tasks[i].UpdatedAt = now
 			break
 		}
 		return writeJSONAtomic(tasksPath, state)
 	})
+}
+
+func (s *Storage) LoadNotificationRecordsByGroupKey(groupKey string) ([]NotificationRecord, error) {
+	state, err := s.LoadNotifications()
+	if err != nil {
+		return nil, err
+	}
+	out := []NotificationRecord{}
+	for _, rec := range state.Records {
+		if rec.GroupKey == groupKey {
+			out = append(out, rec)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StaffName < out[j].StaffName })
+	return out, nil
 }
 
 func (s *Storage) FailNotificationTask(taskID string, taskErr error, nextAttempt time.Time) error {
@@ -1408,8 +1574,18 @@ func (s *Storage) SyncActiveItemsWithLatestShifts(loc *time.Location) (ShiftUpda
 		if err != nil {
 			return err
 		}
+		groups, _ := s.LoadUserGroups()
+		groupMap := map[string]UserGroup{}
+		for _, g := range groups {
+			if g.ID != "" {
+				groupMap[g.ID] = g
+			}
+		}
 		userMap := map[string]StaffUser{}
 		for _, u := range users {
+			if strings.TrimSpace(u.GroupID) == "" {
+				u.GroupID = DefaultUserGroupID
+			}
 			if u.ID != "" {
 				userMap[u.ID] = u
 			}
@@ -1464,7 +1640,18 @@ func (s *Storage) SyncActiveItemsWithLatestShifts(loc *time.Location) (ShiftUpda
 			newStart := start.Format(time.RFC3339)
 			newEnd := end.Format(time.RFC3339)
 			notifyEnabled := shiftNotificationEnabled(shift)
-			if item.ShiftName != shift.Name || item.ShiftShortName != shift.ShortName || item.StartTime != newStart || item.EndTime != newEnd || item.NotifyEnabled == nil || *item.NotifyEnabled != notifyEnabled || (userOK && (item.StaffName != user.Name || item.StaffPhone != strings.TrimSpace(user.Phone) || item.TelegramUserID != user.TelegramUserID)) {
+			newGroupID, newGroupName := item.StaffGroupID, item.StaffGroupName
+			if userOK {
+				newGroupID = strings.TrimSpace(user.GroupID)
+				if newGroupID == "" {
+					newGroupID = DefaultUserGroupID
+				}
+				newGroupName = newGroupID
+				if g, ok := groupMap[newGroupID]; ok && strings.TrimSpace(g.Name) != "" {
+					newGroupName = g.Name
+				}
+			}
+			if item.ShiftName != shift.Name || item.ShiftShortName != shift.ShortName || item.StartTime != newStart || item.EndTime != newEnd || item.NotifyEnabled == nil || *item.NotifyEnabled != notifyEnabled || (userOK && (item.StaffName != user.Name || item.StaffPhone != strings.TrimSpace(user.Phone) || item.StaffGroupID != newGroupID || item.StaffGroupName != newGroupName || item.TelegramUserID != user.TelegramUserID)) {
 				item.ShiftName = shift.Name
 				item.ShiftShortName = shift.ShortName
 				item.StartTime = newStart
@@ -1473,6 +1660,8 @@ func (s *Storage) SyncActiveItemsWithLatestShifts(loc *time.Location) (ShiftUpda
 				if userOK {
 					item.StaffName = user.Name
 					item.StaffPhone = strings.TrimSpace(user.Phone)
+					item.StaffGroupID = newGroupID
+					item.StaffGroupName = newGroupName
 					item.TelegramUserID = user.TelegramUserID
 				}
 				changed++

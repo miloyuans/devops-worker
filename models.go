@@ -57,6 +57,7 @@ type StaffUser struct {
 	Name           string `json:"name"`
 	Email          string `json:"email,omitempty"`
 	Phone          string `json:"phone,omitempty"`
+	GroupID        string `json:"group_id,omitempty"`
 	TelegramUserID int64  `json:"telegram_user_id"`
 	Enabled        bool   `json:"enabled"`
 	CreatedBy      string `json:"created_by,omitempty"` // admin/user/sso，用于 Web 权限隔离
@@ -71,6 +72,19 @@ type StaffUser struct {
 
 type UserDB struct {
 	Users []StaffUser `json:"users"`
+}
+
+type UserGroup struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Enabled   bool   `json:"enabled"`
+	CreatedBy string `json:"created_by,omitempty"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type UserGroupDB struct {
+	Groups []UserGroup `json:"groups"`
 }
 
 type ScheduleDraftChange struct {
@@ -96,6 +110,8 @@ type ScheduleItem struct {
 	StaffID        string `json:"staff_id"`
 	StaffName      string `json:"staff_name"`
 	StaffPhone     string `json:"staff_phone,omitempty"`
+	StaffGroupID   string `json:"staff_group_id,omitempty"`
+	StaffGroupName string `json:"staff_group_name,omitempty"`
 	TelegramUserID int64  `json:"telegram_user_id"`
 	ShiftCode      string `json:"shift_code"`
 	ShiftName      string `json:"shift_name"`
@@ -158,6 +174,9 @@ type NotificationRecord struct {
 	StaffID        string `json:"staff_id"`
 	StaffName      string `json:"staff_name"`
 	StaffPhone     string `json:"staff_phone,omitempty"`
+	GroupKey       string `json:"group_key,omitempty"`
+	GroupID        string `json:"group_id,omitempty"`
+	GroupName      string `json:"group_name,omitempty"`
 	ShiftCode      string `json:"shift_code"`
 	ShiftName      string `json:"shift_name"`
 	TelegramUserID int64  `json:"telegram_user_id"`
@@ -172,21 +191,24 @@ type NotificationState struct {
 }
 
 type NotificationTask struct {
-	ID            string       `json:"id"`
-	Key           string       `json:"key"`
-	ScheduleKey   string       `json:"schedule_key"` // stable date+staff+chat key used to refresh pending tasks after schedule/shift changes
-	ItemKey       string       `json:"item_key"`
-	Status        string       `json:"status"` // pending/sending/retry/sent/cancelled
-	ChatID        int64        `json:"chat_id"`
-	RunAt         string       `json:"run_at"`
-	NextAttemptAt string       `json:"next_attempt_at"`
-	Attempts      int          `json:"attempts"`
-	LastAttemptAt string       `json:"last_attempt_at,omitempty"`
-	LastError     string       `json:"last_error,omitempty"`
-	SentAt        string       `json:"sent_at,omitempty"`
-	CreatedAt     string       `json:"created_at"`
-	UpdatedAt     string       `json:"updated_at"`
-	Item          ScheduleItem `json:"item"`
+	ID            string         `json:"id"`
+	Key           string         `json:"key"`
+	ScheduleKey   string         `json:"schedule_key"` // stable date+staff+chat key used to refresh pending tasks after schedule/shift changes
+	ItemKey       string         `json:"item_key"`
+	Status        string         `json:"status"` // pending/sending/retry/sent/cancelled
+	ChatID        int64          `json:"chat_id"`
+	GroupID       string         `json:"group_id,omitempty"`
+	GroupName     string         `json:"group_name,omitempty"`
+	RunAt         string         `json:"run_at"`
+	NextAttemptAt string         `json:"next_attempt_at"`
+	Attempts      int            `json:"attempts"`
+	LastAttemptAt string         `json:"last_attempt_at,omitempty"`
+	LastError     string         `json:"last_error,omitempty"`
+	SentAt        string         `json:"sent_at,omitempty"`
+	CreatedAt     string         `json:"created_at"`
+	UpdatedAt     string         `json:"updated_at"`
+	Item          ScheduleItem   `json:"item"`
+	Items         []ScheduleItem `json:"items,omitempty"`
 }
 
 type NotificationTaskState struct {
@@ -237,6 +259,7 @@ type PageData struct {
 	Config            Config
 	Active            ActiveSchedule
 	Users             []StaffUser
+	Groups            []UserGroup
 	Shifts            []Shift
 	Approvals         []Approval
 	HistoryDate       string

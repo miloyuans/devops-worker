@@ -16,6 +16,9 @@ const DefaultShiftTimezone = "Asia/Dubai"
 func BuildScheduleItems(rules []ScheduleRule, users []StaffUser, shifts []Shift, loc *time.Location) ([]ScheduleItem, error) {
 	userMap := map[string]StaffUser{}
 	for _, u := range users {
+		if strings.TrimSpace(u.GroupID) == "" {
+			u.GroupID = DefaultUserGroupID
+		}
 		if u.Enabled {
 			userMap[u.ID] = u
 		}
@@ -54,11 +57,17 @@ func BuildScheduleItems(rules []ScheduleRule, users []StaffUser, shifts []Shift,
 					return nil, fmt.Errorf("未知或已禁用用户: %s", staffID)
 				}
 				notifyEnabled := shiftNotificationEnabled(shift)
+				groupID := strings.TrimSpace(staff.GroupID)
+				if groupID == "" {
+					groupID = DefaultUserGroupID
+				}
 				item := ScheduleItem{
 					Date:           date.Format("2006-01-02"),
 					StaffID:        staff.ID,
 					StaffName:      staff.Name,
 					StaffPhone:     strings.TrimSpace(staff.Phone),
+					StaffGroupID:   groupID,
+					StaffGroupName: groupID,
 					TelegramUserID: staff.TelegramUserID,
 					ShiftCode:      shift.Code,
 					ShiftName:      shift.Name,
@@ -588,6 +597,23 @@ func notificationItemKey(item ScheduleItem) string {
 // be refreshed in-place when schedule or shift time changes.
 func notificationScheduleKey(item ScheduleItem, chatID int64) string {
 	return fmt.Sprintf("%s|%s|%d", item.Date, item.StaffID, chatID)
+}
+
+func notificationGroupScheduleKey(date, groupID, shiftCode string, chatID int64) string {
+	return fmt.Sprintf("group|%s|%s|%s|%d", date, groupID, shiftCode, chatID)
+}
+
+func notificationTaskItemKey(items []ScheduleItem) string {
+	keys := make([]string, 0, len(items))
+	for _, item := range items {
+		keys = append(keys, notificationItemKey(item))
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ";")
+}
+
+func notificationTaskKey(scheduleKey string, items []ScheduleItem) string {
+	return fmt.Sprintf("%s|%s", scheduleKey, notificationTaskItemKey(items))
 }
 
 func notificationKey(item ScheduleItem, chatID int64) string {
