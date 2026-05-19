@@ -960,7 +960,9 @@ func (s *Storage) TodayNotificationTasksComplete(loc *time.Location) (complete b
 	if loc == nil {
 		loc = time.Local
 	}
-	today := time.Now().In(loc).Format("2006-01-02")
+	now := time.Now().In(loc)
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	tomorrowStart := todayStart.AddDate(0, 0, 1)
 	err = s.WithLock(func() error {
 		path := filepath.Join(s.Dir, "meta", "notification_tasks.json")
 		state := NotificationTaskState{Tasks: []NotificationTask{}}
@@ -969,9 +971,25 @@ func (s *Storage) TodayNotificationTasksComplete(loc *time.Location) (complete b
 			state.Tasks = []NotificationTask{}
 		}
 		for _, task := range state.Tasks {
-			if task.Item.Date != today {
-				continue
+			// Queue idleness must be based on the task consumption time, not only
+			// the shift date.  A shift that starts at 00:00 on the next local day has
+			// run_at at 23:30 on the previous day.  If we only checked task.Item.Date,
+			// the scheduler could decide today's queue is complete and sleep until
+			// midnight, missing the intended 23:30 notification window.
+			runAt, parseErr := time.Parse(time.RFC3339, task.RunAt)
+			if parseErr != nil {
+				// Backward-compatible fallback for legacy tasks with a bad/missing run_at:
+				// treat tasks for the visible local date as today's work.
+				if task.Item.Date != now.Format("2006-01-02") {
+					continue
+				}
+			} else {
+				runAtLocal := runAt.In(loc)
+				if runAtLocal.Before(todayStart) || !runAtLocal.Before(tomorrowStart) {
+					continue
+				}
 			}
+
 			total++
 			switch task.Status {
 			case "sent", "cancelled":
