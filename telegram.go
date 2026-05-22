@@ -589,12 +589,22 @@ func (t *TelegramService) maybeSendDailyScheduleReport() time.Duration {
 		}
 		threadID := t.getThreadID(chatID, 0)
 		chatSent := true
+		firstMessageID := 0
 		for i, msg := range messages {
-			if err := t.sendMessage(chatID, threadID, msg, "HTML"); err != nil {
+			sent, err := t.sendMessageResult(chatID, threadID, msg, "HTML")
+			if err != nil {
 				chatSent = false
 				allSent = false
 				log.Printf("send daily schedule report failed chat=%d part=%d/%d date=%s: %v", chatID, i+1, len(messages), date, err)
 				break
+			}
+			if i == 0 {
+				firstMessageID = sent.MessageID
+			}
+		}
+		if chatSent && firstMessageID > 0 {
+			if err := t.pinChatMessage(chatID, firstMessageID, true); err != nil {
+				log.Printf("pin daily schedule report failed chat=%d msg=%d date=%s: %v", chatID, firstMessageID, date, err)
 			}
 		}
 		if chatSent {
@@ -684,28 +694,35 @@ func (t *TelegramService) buildDailyScheduleReportMessages(date string, statuses
 		return groups[i].Name < groups[j].Name
 	})
 
-	header := fmt.Sprintf("📋 <b>%s 排班明细</b>\n<code>自动日报 %s</code>\n", html.EscapeString(dateWithWeekday(date, t.Loc)), html.EscapeString(strings.TrimSpace(t.Cfg.DailyReportTime)))
+	baseHeader := fmt.Sprintf("📋 <b>%s 排班明细</b>\n<code>自动日报 %s</code>\n", html.EscapeString(dateWithWeekday(date, t.Loc)), html.EscapeString(strings.TrimSpace(t.Cfg.DailyReportTime)))
 	if strings.TrimSpace(t.Cfg.WorkOrderURL) != "" {
-		header += fmt.Sprintf("工单: %s\n", html.EscapeString(strings.TrimSpace(t.Cfg.WorkOrderURL)))
+		baseHeader += fmt.Sprintf("工单: %s\n", html.EscapeString(strings.TrimSpace(t.Cfg.WorkOrderURL)))
+	}
+	notifyHeader := baseHeader
+	if len(t.Cfg.ApproverUserIDs) > 0 {
+		notifyHeader += fmt.Sprintf("审批人: %s\n", t.approverMentionText(t.Cfg.ApproverUserIDs))
+	}
+	if len(groups) == 0 {
+		return []string{notifyHeader + "\n今日无排班。"}
 	}
 
 	var messages []string
-	current := header
+	current := notifyHeader
 	appendChunk := func() {
 		if strings.TrimSpace(current) != "" {
 			messages = append(messages, current)
 		}
-		current = header
+		current = baseHeader
 	}
 	for _, g := range groups {
 		section := t.renderDailyScheduleGroup(g)
-		if len([]rune(current))+len([]rune(section)) > 3600 && current != header {
+		if len([]rune(current))+len([]rune(section)) > 3600 && current != notifyHeader && current != baseHeader {
 			appendChunk()
 		}
 		if len([]rune(section)) > 3400 {
 			lines := strings.Split(section, "\n")
 			for _, line := range lines {
-				if len([]rune(current))+len([]rune(line))+1 > 3600 && current != header {
+				if len([]rune(current))+len([]rune(line))+1 > 3600 && current != notifyHeader && current != baseHeader {
 					appendChunk()
 				}
 				current += line + "\n"
@@ -714,7 +731,7 @@ func (t *TelegramService) buildDailyScheduleReportMessages(date string, statuses
 		}
 		current += section + "\n"
 	}
-	if current != header || len(messages) == 0 {
+	if (current != notifyHeader && current != baseHeader) || len(messages) == 0 {
 		messages = append(messages, current)
 	}
 	if len(messages) > 1 {
@@ -1066,10 +1083,20 @@ func (t *TelegramService) getThreadID(chatID int64, msgThreadID int) int {
 }
 
 func (t *TelegramService) sendMessage(chatID int64, threadID int, text string, parseMode string) error {
-	return t.sendMessageWithMarkup(chatID, threadID, text, parseMode, nil)
+	_, err := t.sendMessageWithMarkupResult(chatID, threadID, text, parseMode, nil)
+	return err
+}
+
+func (t *TelegramService) sendMessageResult(chatID int64, threadID int, text string, parseMode string) (telegramMessage, error) {
+	return t.sendMessageWithMarkupResult(chatID, threadID, text, parseMode, nil)
 }
 
 func (t *TelegramService) sendMessageWithMarkup(chatID int64, threadID int, text string, parseMode string, replyMarkup any) error {
+	_, err := t.sendMessageWithMarkupResult(chatID, threadID, text, parseMode, replyMarkup)
+	return err
+}
+
+func (t *TelegramService) sendMessageWithMarkupResult(chatID int64, threadID int, text string, parseMode string, replyMarkup any) (telegramMessage, error) {
 	vals := url.Values{}
 	vals.Set("chat_id", strconv.FormatInt(chatID, 10))
 	vals.Set("text", text)
@@ -1083,8 +1110,23 @@ func (t *TelegramService) sendMessageWithMarkup(chatID int64, threadID int, text
 		rm, _ := json.Marshal(replyMarkup)
 		vals.Set("reply_markup", string(rm))
 	}
-	var resp telegramAPIResponse[json.RawMessage]
+	var resp telegramAPIResponse[telegramMessage]
 	if err := t.postForm("sendMessage", vals, &resp); err != nil {
+		return telegramMessage{}, err
+	}
+	if !resp.OK {
+		return telegramMessage{}, fmt.Errorf(resp.Description)
+	}
+	return resp.Result, nil
+}
+
+func (t *TelegramService) pinChatMessage(chatID int64, messageID int, disableNotification bool) error {
+	vals := url.Values{}
+	vals.Set("chat_id", strconv.FormatInt(chatID, 10))
+	vals.Set("message_id", strconv.Itoa(messageID))
+	vals.Set("disable_notification", strconv.FormatBool(disableNotification))
+	var resp telegramAPIResponse[bool]
+	if err := t.postForm("pinChatMessage", vals, &resp); err != nil {
 		return err
 	}
 	if !resp.OK {
