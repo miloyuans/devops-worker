@@ -123,12 +123,14 @@ type ScheduleItem struct {
 
 type ScheduleItemStatus struct {
 	ScheduleItem
-	StartClock        string `json:"start_clock"`
-	EndClock          string `json:"end_clock"`
-	NotifyStatus      string `json:"notify_status"`
-	NotifyStatusLabel string `json:"notify_status_label"`
-	ReadStatus        string `json:"read_status"`
-	ReadStatusLabel   string `json:"read_status_label"`
+	StartClock          string `json:"start_clock"`
+	EndClock            string `json:"end_clock"`
+	NotifyStatus        string `json:"notify_status"`
+	NotifyStatusLabel   string `json:"notify_status_label"`
+	ReadStatus          string `json:"read_status"`
+	ReadStatusLabel     string `json:"read_status_label"`
+	ReportDateLabel     string `json:"report_date_label,omitempty"`
+	LeaveRemainingLabel string `json:"leave_remaining_label,omitempty"`
 }
 
 type ActiveSchedule struct {

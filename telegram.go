@@ -568,12 +568,13 @@ func (t *TelegramService) maybeSendDailyScheduleReport() time.Duration {
 	}
 
 	date := now.Format("2006-01-02")
-	items, err := t.Store.LoadDay(date)
+	items, err := t.loadDailyScheduleReportItems(date, reportAt)
 	if err != nil {
-		log.Printf("daily schedule report load day failed date=%s: %v", date, err)
+		log.Printf("daily schedule report load failed date=%s: %v", date, err)
 		return 300 * time.Second
 	}
 	statuses := t.Store.BuildScheduleItemStatuses(items, t.Loc)
+	statuses = t.enrichDailyScheduleReportStatuses(date, statuses)
 	messages := t.buildDailyScheduleReportMessages(date, statuses)
 	if len(messages) == 0 {
 		messages = []string{fmt.Sprintf("📋 <b>%s 排班明细</b>\n\n今日无排班。", html.EscapeString(dateWithWeekday(date, t.Loc)))}
@@ -618,6 +619,233 @@ func (t *TelegramService) maybeSendDailyScheduleReport() time.Duration {
 		return 300 * time.Second
 	}
 	return time.Until(dailyReportTimeForDate(now.AddDate(0, 0, 1), t.Cfg.DailyReportTime, t.Loc))
+}
+
+func (t *TelegramService) loadDailyScheduleReportItems(date string, reportAt time.Time) ([]ScheduleItem, error) {
+	loc := t.Loc
+	if loc == nil {
+		loc = time.Local
+	}
+	reportDay, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(date), loc)
+	if err != nil {
+		return nil, fmt.Errorf("invalid daily report date %q: %w", date, err)
+	}
+
+	todayItems, err := t.Store.LoadDay(date)
+	if err != nil {
+		return nil, fmt.Errorf("load %s: %w", date, err)
+	}
+	nextDate := reportDay.AddDate(0, 0, 1).Format("2006-01-02")
+	nextDayItems, err := t.Store.LoadDay(nextDate)
+	if err != nil {
+		return nil, fmt.Errorf("load %s: %w", nextDate, err)
+	}
+
+	items := make([]ScheduleItem, 0, len(todayItems)+len(nextDayItems))
+	for _, item := range todayItems {
+		if dailyReportUsesNextDayNightShift(item, reportAt, loc) {
+			continue
+		}
+		items = append(items, item)
+	}
+	for _, item := range nextDayItems {
+		if dailyReportUsesNextDayNightShift(item, reportAt, loc) {
+			items = append(items, item)
+		}
+	}
+	sortScheduleItems(items)
+	return items, nil
+}
+
+func dailyReportUsesNextDayNightShift(item ScheduleItem, reportAt time.Time, loc *time.Location) bool {
+	if !isNightScheduleItem(item) {
+		return false
+	}
+	start, ok := scheduleItemStartInLocation(item, loc)
+	if !ok {
+		return strings.EqualFold(strings.TrimSpace(item.ShiftCode), "night")
+	}
+	reportClock := reportAt.In(loc).Hour()*60 + reportAt.In(loc).Minute()
+	startClock := start.Hour()*60 + start.Minute()
+	return startClock <= reportClock
+}
+
+func scheduleItemStartInLocation(item ScheduleItem, loc *time.Location) (time.Time, bool) {
+	if loc == nil {
+		loc = time.Local
+	}
+	start, err := time.Parse(time.RFC3339, strings.TrimSpace(item.StartTime))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return start.In(loc), true
+}
+
+func scheduleItemEndInLocation(item ScheduleItem, loc *time.Location) (time.Time, bool) {
+	if loc == nil {
+		loc = time.Local
+	}
+	end, err := time.Parse(time.RFC3339, strings.TrimSpace(item.EndTime))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return end.In(loc), true
+}
+
+func (t *TelegramService) enrichDailyScheduleReportStatuses(reportDate string, statuses []ScheduleItemStatus) []ScheduleItemStatus {
+	active, err := t.Store.LoadActive()
+	if err != nil {
+		log.Printf("daily schedule report load active for leave remaining failed date=%s: %v", reportDate, err)
+	}
+	for i := range statuses {
+		if strings.TrimSpace(statuses[i].Date) != strings.TrimSpace(reportDate) {
+			statuses[i].ReportDateLabel = "班次日期: " + dateWithWeekday(statuses[i].Date, t.Loc)
+		}
+		if err == nil && isLeaveScheduleItem(statuses[i].ScheduleItem) {
+			statuses[i].LeaveRemainingLabel = dailyLeaveRemainingLabel(statuses[i].ScheduleItem, active.Items, t.Loc)
+		}
+	}
+	return statuses
+}
+
+func isNightScheduleItem(item ScheduleItem) bool {
+	return shiftGroupRank(item.ShiftCode, item.ShiftName, item.ShiftShortName) == 30
+}
+
+func isLeaveScheduleItem(item ScheduleItem) bool {
+	code := strings.ToLower(strings.TrimSpace(item.ShiftCode))
+	if code == "annual_leave" || code == "sick_leave" || strings.Contains(code, "leave") || strings.Contains(code, "vacation") {
+		return true
+	}
+	joined := item.ShiftName + item.ShiftShortName
+	markers := []string{"年假", "病假", "事假", "婚假", "产假", "丧假", "陪产假", "调休", "补休", "休假", "假"}
+	for _, marker := range markers {
+		if strings.Contains(joined, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameLeaveScheduleType(a, b ScheduleItem) bool {
+	if strings.TrimSpace(a.StaffID) != "" && strings.TrimSpace(b.StaffID) != "" && strings.TrimSpace(a.StaffID) != strings.TrimSpace(b.StaffID) {
+		return false
+	}
+	ac := strings.ToLower(strings.TrimSpace(a.ShiftCode))
+	bc := strings.ToLower(strings.TrimSpace(b.ShiftCode))
+	if ac != "" && bc != "" {
+		return ac == bc
+	}
+	return strings.TrimSpace(a.ShiftName) == strings.TrimSpace(b.ShiftName) && strings.TrimSpace(a.ShiftShortName) == strings.TrimSpace(b.ShiftShortName)
+}
+
+func dailyLeaveRemainingLabel(item ScheduleItem, allItems []ScheduleItem, loc *time.Location) string {
+	if !isLeaveScheduleItem(item) {
+		return ""
+	}
+	if loc == nil {
+		loc = time.Local
+	}
+	startDate, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(item.Date), loc)
+	if err != nil {
+		return ""
+	}
+	byDate := map[string]ScheduleItem{}
+	for _, candidate := range allItems {
+		if strings.TrimSpace(candidate.StaffID) != strings.TrimSpace(item.StaffID) || !isLeaveScheduleItem(candidate) || !sameLeaveScheduleType(item, candidate) {
+			continue
+		}
+		if strings.TrimSpace(candidate.Date) == "" {
+			continue
+		}
+		byDate[strings.TrimSpace(candidate.Date)] = candidate
+	}
+	byDate[item.Date] = item
+
+	endDate := startDate
+	for {
+		next := endDate.AddDate(0, 0, 1).Format("2006-01-02")
+		if _, ok := byDate[next]; !ok {
+			break
+		}
+		endDate = endDate.AddDate(0, 0, 1)
+	}
+
+	remainingItems := make([]ScheduleItem, 0)
+	for d := startDate; !d.After(endDate); d = d.AddDate(0, 0, 1) {
+		if it, ok := byDate[d.Format("2006-01-02")]; ok {
+			remainingItems = append(remainingItems, it)
+		}
+	}
+	if len(remainingItems) == 0 {
+		return ""
+	}
+
+	fullDayOnly := true
+	var total time.Duration
+	for _, it := range remainingItems {
+		dur := scheduleItemDuration(it, loc)
+		if dur <= 0 {
+			fullDayOnly = false
+			continue
+		}
+		total += dur
+		if dur < 23*time.Hour {
+			fullDayOnly = false
+		}
+	}
+
+	endLabel := dateWithWeekday(endDate.Format("2006-01-02"), loc)
+	if fullDayOnly {
+		if len(remainingItems) == 1 {
+			return "剩余休假: 含当日 1天"
+		}
+		return fmt.Sprintf("剩余休假: 含当日 %d天（至%s）", len(remainingItems), endLabel)
+	}
+	if total > 0 {
+		if len(remainingItems) == 1 {
+			return "剩余休假: " + formatLeaveDuration(total)
+		}
+		return fmt.Sprintf("剩余休假: %s（至%s）", formatLeaveDuration(total), endLabel)
+	}
+	return "剩余休假: 已排至" + endLabel
+}
+
+func scheduleItemDuration(item ScheduleItem, loc *time.Location) time.Duration {
+	start, ok := scheduleItemStartInLocation(item, loc)
+	if !ok {
+		return 0
+	}
+	end, ok := scheduleItemEndInLocation(item, loc)
+	if !ok || !end.After(start) {
+		return 0
+	}
+	return end.Sub(start)
+}
+
+func formatLeaveDuration(d time.Duration) string {
+	if d <= 0 {
+		return "0小时"
+	}
+	minutes := int(d.Round(time.Minute).Minutes())
+	days := minutes / (24 * 60)
+	minutes %= 24 * 60
+	hours := minutes / 60
+	minutes %= 60
+	parts := []string{}
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%d天", days))
+	}
+	if hours > 0 {
+		parts = append(parts, fmt.Sprintf("%d小时", hours))
+	}
+	if minutes > 0 {
+		parts = append(parts, fmt.Sprintf("%d分钟", minutes))
+	}
+	if len(parts) == 0 {
+		return "不足1分钟"
+	}
+	return strings.Join(parts, "")
 }
 
 func dailyReportTimeForDate(day time.Time, clock string, loc *time.Location) time.Time {
@@ -695,6 +923,16 @@ func (t *TelegramService) buildDailyScheduleReportMessages(date string, statuses
 	})
 
 	baseHeader := fmt.Sprintf("📋 <b>%s 排班明细</b>\n<code>自动日报 %s</code>\n", html.EscapeString(dateWithWeekday(date, t.Loc)), html.EscapeString(strings.TrimSpace(t.Cfg.DailyReportTime)))
+	forwardedNightDate := ""
+	for _, st := range statuses {
+		if strings.TrimSpace(st.Date) != strings.TrimSpace(date) && isNightScheduleItem(st.ScheduleItem) {
+			forwardedNightDate = st.Date
+			break
+		}
+	}
+	if forwardedNightDate != "" {
+		baseHeader += fmt.Sprintf("夜班口径: %s 00:00 后开始的夜班\n", html.EscapeString(dateWithWeekday(forwardedNightDate, t.Loc)))
+	}
 	if strings.TrimSpace(t.Cfg.WorkOrderURL) != "" {
 		baseHeader += fmt.Sprintf("工单: %s\n", html.EscapeString(strings.TrimSpace(t.Cfg.WorkOrderURL)))
 	}
@@ -762,7 +1000,15 @@ func (t *TelegramService) renderDailyScheduleGroup(g *dailyScheduleGroup) string
 		if strings.TrimSpace(st.StaffPhone) != "" {
 			phone = " ｜ ☎ " + html.EscapeString(strings.TrimSpace(st.StaffPhone))
 		}
-		b.WriteString(fmt.Sprintf("• <b>%s</b>%s ｜ %s ｜ %s ｜ %s\n", html.EscapeString(st.StaffName), phone, html.EscapeString(st.NotifyStatusLabel), html.EscapeString(st.ReadStatusLabel), html.EscapeString(tg)))
+		datePart := ""
+		if strings.TrimSpace(st.ReportDateLabel) != "" {
+			datePart = " ｜ " + html.EscapeString(strings.TrimSpace(st.ReportDateLabel))
+		}
+		leavePart := ""
+		if strings.TrimSpace(st.LeaveRemainingLabel) != "" {
+			leavePart = " ｜ " + html.EscapeString(strings.TrimSpace(st.LeaveRemainingLabel))
+		}
+		b.WriteString(fmt.Sprintf("• <b>%s</b>%s%s%s ｜ %s ｜ %s ｜ %s\n", html.EscapeString(st.StaffName), phone, datePart, leavePart, html.EscapeString(st.NotifyStatusLabel), html.EscapeString(st.ReadStatusLabel), html.EscapeString(tg)))
 	}
 	return b.String()
 }
