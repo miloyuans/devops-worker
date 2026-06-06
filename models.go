@@ -250,40 +250,59 @@ type ShiftUpdateSummary struct {
 	VersionID    string
 }
 
+// ScheduleMonthVersion is an exportable monthly schedule snapshot.  Historical
+// versions are reconstructed from approved approvals, while the active schedule
+// is exposed as the latest version for the months it still contains.
+type ScheduleMonthVersion struct {
+	Key              string `json:"key"`
+	Revision         int    `json:"revision"`
+	VersionID        string `json:"version_id"`
+	Label            string `json:"label"`
+	EffectiveAt      string `json:"effective_at,omitempty"`
+	Source           string `json:"source"`
+	SourceApprovalID string `json:"source_approval_id,omitempty"`
+	Reviewer         string `json:"reviewer,omitempty"`
+	ItemsCount       int    `json:"items_count"`
+	IsActive         bool   `json:"is_active"`
+	IsLatest         bool   `json:"is_latest"`
+}
+
 type PageData struct {
-	Title             string
-	Role              string
-	IsAdmin           bool
-	IsAuthenticated   bool
-	CurrentUserName   string
-	CurrentUserEmail  string
-	CurrentUserSource string
-	Config            Config
-	Active            ActiveSchedule
-	Users             []StaffUser
-	Groups            []UserGroup
-	Shifts            []Shift
-	Approvals         []Approval
-	HistoryDate       string
-	History           []ScheduleItemStatus
-	Message           string
-	Error             string
-	NowYear           int
-	NowMonth          int
-	NowDate           string
-	Months            []int
-	WeekNums          []int
-	TimeOptions       []string
-	TimezoneOptions   []TimezoneOption
-	CalendarYear      int
-	CalendarMonth     int
-	CalendarDays      []CalendarDay
-	SelectedDate      string
-	SelectedDayItems  []ScheduleItemStatus
-	DayStatus         map[string][]ScheduleItemStatus
-	CalendarPrevYear  int
-	CalendarPrevMonth int
-	CalendarNextYear  int
-	CalendarNextMonth int
-	SSOSettings       SSOSettings
+	Title              string
+	Role               string
+	IsAdmin            bool
+	IsAuthenticated    bool
+	CurrentUserName    string
+	CurrentUserEmail   string
+	CurrentUserSource  string
+	Config             Config
+	Active             ActiveSchedule
+	Users              []StaffUser
+	Groups             []UserGroup
+	Shifts             []Shift
+	Approvals          []Approval
+	HistoryDate        string
+	History            []ScheduleItemStatus
+	Message            string
+	Error              string
+	NowYear            int
+	NowMonth           int
+	NowDate            string
+	Months             []int
+	WeekNums           []int
+	TimeOptions        []string
+	TimezoneOptions    []TimezoneOption
+	CalendarYear       int
+	CalendarMonth      int
+	CalendarDays       []CalendarDay
+	SelectedDate       string
+	SelectedDayItems   []ScheduleItemStatus
+	DayStatus          map[string][]ScheduleItemStatus
+	CalendarPrevYear   int
+	CalendarPrevMonth  int
+	CalendarNextYear   int
+	CalendarNextMonth  int
+	ScheduleVersions   []ScheduleMonthVersion
+	SelectedVersionKey string
+	SSOSettings        SSOSettings
 }

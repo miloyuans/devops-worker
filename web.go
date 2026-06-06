@@ -153,6 +153,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/shifts/update", a.handleShiftUpdate)
 	mux.HandleFunc("/shifts/delete", a.handleShiftDelete)
 	mux.HandleFunc("/schedule", a.handleSchedule)
+	mux.HandleFunc("/schedule/export", a.handleScheduleExport)
 	mux.HandleFunc("/schedule/submit", a.handleScheduleSubmit)
 	mux.HandleFunc("/approvals", a.handleApprovals)
 	mux.HandleFunc("/approvals/approve", a.handleApprovalApprove)
@@ -1094,7 +1095,54 @@ func (a *App) handleSchedule(w http.ResponseWriter, r *http.Request) {
 	a.fillCalendarWithLoc(&data, year, month, selected, active.Items, loc)
 	a.fillDayStatusesWithLoc(&data, active.Items, loc)
 	data.SelectedDayItems = a.Store.BuildScheduleItemStatuses(filterItemsByDate(active.Items, selected), loc)
+	data.ScheduleVersions, _ = a.Store.ListScheduleMonthVersions(year, month, loc)
+	if len(data.ScheduleVersions) > 0 {
+		data.SelectedVersionKey = data.ScheduleVersions[0].Key
+	}
 	a.render(w, "schedule", data)
+}
+
+func (a *App) handleScheduleExport(w http.ResponseWriter, r *http.Request) {
+	if a.role(r) != "admin" {
+		http.Error(w, "只有超级管理员可以导出包含手机号的排班表", http.StatusForbidden)
+		return
+	}
+	loc := a.requestLocation(r)
+	now := time.Now().In(loc)
+	year := parseQueryInt(r, "year", now.Year())
+	month := parseQueryInt(r, "month", int(now.Month()))
+	if month < 1 || month > 12 {
+		http.Error(w, "月份参数无效", http.StatusBadRequest)
+		return
+	}
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "" {
+		format = "xlsx"
+	}
+	if format != "xlsx" && format != "csv" {
+		http.Error(w, "format 只支持 xlsx 或 csv", http.StatusBadRequest)
+		return
+	}
+	version, items, err := a.Store.ResolveScheduleMonthVersion(year, month, r.URL.Query().Get("version"), loc)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	users, _ := a.Store.LoadUsers()
+	exportData := buildScheduleExportData(year, month, version, items, users, loc)
+	filename := fmt.Sprintf("devops-worker-schedule-%04d-%02d-rev%d.%s", year, month, version.Revision, format)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	if format == "csv" {
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		if err := writeScheduleCSV(w, exportData); err != nil {
+			log.Printf("write schedule csv export failed: %v", err)
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	if err := writeScheduleXLSX(w, exportData); err != nil {
+		log.Printf("write schedule xlsx export failed: %v", err)
+	}
 }
 
 func (a *App) handleScheduleSubmit(w http.ResponseWriter, r *http.Request) {
@@ -1332,6 +1380,10 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 	a.fillCalendarWithLoc(&data, year, month, date, items, loc)
 	a.fillDayStatusesWithLoc(&data, items, loc)
 	data.SelectedDayItems = data.History
+	data.ScheduleVersions, _ = a.Store.ListScheduleMonthVersions(year, month, loc)
+	if len(data.ScheduleVersions) > 0 {
+		data.SelectedVersionKey = data.ScheduleVersions[0].Key
+	}
 	a.render(w, "history", data)
 }
 
