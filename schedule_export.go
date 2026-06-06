@@ -19,11 +19,12 @@ import (
 const latestScheduleVersionKey = "latest"
 
 type scheduleExportData struct {
-	Year    int
-	Month   int
-	Version ScheduleMonthVersion
-	Matrix  [][]string
-	Details [][]string
+	Year        int
+	Month       int
+	Version     ScheduleMonthVersion
+	Matrix      [][]string
+	Details     [][]string
+	ShiftLegend [][]string
 }
 
 func (s *Storage) ListScheduleMonthVersions(year int, month int, loc *time.Location) ([]ScheduleMonthVersion, error) {
@@ -272,7 +273,7 @@ func filterItemsByMonth(items []ScheduleItem, year int, month int, loc *time.Loc
 	return out
 }
 
-func buildScheduleExportData(year int, month int, version ScheduleMonthVersion, items []ScheduleItem, users []StaffUser, loc *time.Location) scheduleExportData {
+func buildScheduleExportData(year int, month int, version ScheduleMonthVersion, items []ScheduleItem, users []StaffUser, shifts []Shift, loc *time.Location) scheduleExportData {
 	if loc == nil {
 		loc = time.Local
 	}
@@ -309,7 +310,9 @@ func buildScheduleExportData(year int, month int, version ScheduleMonthVersion, 
 		matrix = append(matrix, row)
 	}
 
-	details := [][]string{{"日期", "星期", "姓名", "手机号", "用户组", "班次", "班次简称", "开始时间", "结束时间", "Telegram User ID", "Staff ID"}}
+	shiftLegend := buildShiftLegendRows(shifts, items)
+	shiftDescriptions := shiftDescriptionByCode(shiftLegend)
+	details := [][]string{{"日期", "星期", "姓名", "手机号", "用户组", "班次", "班次简称", "班次时间说明", "开始时间", "结束时间", "Telegram User ID", "Staff ID"}}
 	for _, item := range items {
 		details = append(details, []string{
 			item.Date,
@@ -319,13 +322,137 @@ func buildScheduleExportData(year int, month int, version ScheduleMonthVersion, 
 			firstNonEmpty(item.StaffGroupName, item.StaffGroupID),
 			item.ShiftName,
 			item.ShiftShortName,
+			shiftDescriptions[item.ShiftCode],
 			formatExportClock(item.StartTime, loc),
 			formatExportClock(item.EndTime, loc),
 			formatMaybeInt64(item.TelegramUserID),
 			item.StaffID,
 		})
 	}
-	return scheduleExportData{Year: year, Month: month, Version: version, Matrix: matrix, Details: details}
+	return scheduleExportData{Year: year, Month: month, Version: version, Matrix: matrix, Details: details, ShiftLegend: shiftLegend}
+}
+
+func buildShiftLegendRows(shifts []Shift, items []ScheduleItem) [][]string {
+	rows := [][]string{{"班次编码", "班次名称", "简称", "班次时间说明", "开始", "结束", "时区", "是否跨天", "通知"}}
+	seen := map[string]bool{}
+	ordered := make([]Shift, 0, len(shifts))
+	for _, sh := range shifts {
+		code := strings.TrimSpace(sh.Code)
+		if code == "" || seen[code] {
+			continue
+		}
+		seen[code] = true
+		ordered = append(ordered, sh)
+	}
+	for _, item := range items {
+		code := strings.TrimSpace(item.ShiftCode)
+		if code == "" || seen[code] {
+			continue
+		}
+		startClock := clockFromRFC3339(item.StartTime)
+		endClock := clockFromRFC3339(item.EndTime)
+		if startClock == "" {
+			startClock = clockPart(item.StartTime)
+		}
+		if endClock == "" {
+			endClock = clockPart(item.EndTime)
+		}
+		sh := Shift{
+			Code:      code,
+			Name:      firstNonEmpty(item.ShiftName, code),
+			ShortName: firstNonEmpty(item.ShiftShortName, code),
+			Start:     startClock,
+			End:       endClock,
+			Timezone:  DefaultShiftTimezone,
+			CrossDay:  deriveCrossDay(startClock, endClock),
+			Enabled:   true,
+		}
+		seen[code] = true
+		ordered = append(ordered, sh)
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].CreatedBy == "system" && ordered[j].CreatedBy != "system" {
+			return true
+		}
+		if ordered[i].CreatedBy != "system" && ordered[j].CreatedBy == "system" {
+			return false
+		}
+		return ordered[i].Code < ordered[j].Code
+	})
+	for _, sh := range ordered {
+		rows = append(rows, []string{
+			sh.Code,
+			sh.Name,
+			sh.ShortName,
+			formatShiftTimeDescription(sh),
+			sh.Start,
+			sh.End,
+			firstNonEmpty(sh.Timezone, DefaultShiftTimezone),
+			yesNo(shiftCrossesDay(sh)),
+			yesNo(shiftNotificationEnabled(sh)),
+		})
+	}
+	return rows
+}
+
+func shiftDescriptionByCode(rows [][]string) map[string]string {
+	out := map[string]string{}
+	for i, row := range rows {
+		if i == 0 || len(row) < 4 {
+			continue
+		}
+		out[row[0]] = row[3]
+	}
+	return out
+}
+
+func formatShiftTimeDescription(sh Shift) string {
+	start := strings.TrimSpace(sh.Start)
+	end := strings.TrimSpace(sh.End)
+	if start == "" && end == "" {
+		return ""
+	}
+	desc := start + "-" + end
+	if strings.TrimSpace(sh.End) == "24:00" {
+		desc += "（次日 00:00 结束）"
+	} else if shiftCrossesDay(sh) {
+		desc += "（跨天，次日结束）"
+	} else {
+		desc += "（当日）"
+	}
+	if tz := strings.TrimSpace(sh.Timezone); tz != "" {
+		desc += " " + tz
+	}
+	return desc
+}
+
+func shiftCrossesDay(sh Shift) bool {
+	if sh.CrossDay {
+		return true
+	}
+	return deriveCrossDay(sh.Start, sh.End)
+}
+
+func yesNo(v bool) string {
+	if v {
+		return "是"
+	}
+	return "否"
+}
+
+func clockFromRFC3339(v string) string {
+	if t, err := time.Parse(time.RFC3339, strings.TrimSpace(v)); err == nil {
+		return t.Format("15:04")
+	}
+	return ""
+}
+
+func clockPart(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) >= 5 {
+		return v[len(v)-5:]
+	}
+	return v
 }
 
 type scheduleExportStaff struct {
@@ -396,7 +523,12 @@ func scheduleExportStaffRows(items []ScheduleItem, users []StaffUser) []schedule
 func writeScheduleCSV(w io.Writer, data scheduleExportData) error {
 	_, _ = w.Write([]byte("\ufeff"))
 	cw := csv.NewWriter(w)
-	for _, row := range padStringRows(data.Matrix) {
+	rows := append([][]string{}, data.Matrix...)
+	if len(data.ShiftLegend) > 0 {
+		rows = append(rows, []string{})
+		rows = append(rows, data.ShiftLegend...)
+	}
+	for _, row := range padStringRows(rows) {
 		if err := cw.Write(row); err != nil {
 			return err
 		}
@@ -427,13 +559,14 @@ func writeScheduleXLSX(w io.Writer, data scheduleExportData) error {
 	files := map[string]string{
 		"[Content_Types].xml":        xlsxContentTypesXML(),
 		"_rels/.rels":                xlsxRootRelsXML(),
-		"xl/workbook.xml":            xlsxWorkbookXML([]string{"排班月表", "排班明细"}),
-		"xl/_rels/workbook.xml.rels": xlsxWorkbookRelsXML(2),
+		"xl/workbook.xml":            xlsxWorkbookXML([]string{"排班月表", "排班明细", "班次说明"}),
+		"xl/_rels/workbook.xml.rels": xlsxWorkbookRelsXML(3),
 		"xl/styles.xml":              xlsxStylesXML(),
 		"xl/worksheets/sheet1.xml":   xlsxWorksheetXML(data.Matrix, true),
 		"xl/worksheets/sheet2.xml":   xlsxWorksheetXML(data.Details, false),
+		"xl/worksheets/sheet3.xml":   xlsxWorksheetXML(data.ShiftLegend, false),
 	}
-	ordered := []string{"[Content_Types].xml", "_rels/.rels", "xl/workbook.xml", "xl/_rels/workbook.xml.rels", "xl/styles.xml", "xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml"}
+	ordered := []string{"[Content_Types].xml", "_rels/.rels", "xl/workbook.xml", "xl/_rels/workbook.xml.rels", "xl/styles.xml", "xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml", "xl/worksheets/sheet3.xml"}
 	for _, name := range ordered {
 		fh, err := zw.Create(name)
 		if err != nil {
@@ -450,7 +583,7 @@ func writeScheduleXLSX(w io.Writer, data scheduleExportData) error {
 
 func xlsxContentTypesXML() string {
 	return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`
 }
 
 func xlsxRootRelsXML() string {

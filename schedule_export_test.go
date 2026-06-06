@@ -44,6 +44,14 @@ func testScheduleExportStore(t *testing.T, loc *time.Location) *Storage {
 	return store
 }
 
+func flattenRows(rows [][]string) []string {
+	out := []string{}
+	for _, row := range rows {
+		out = append(out, row...)
+	}
+	return out
+}
+
 func TestScheduleExportDefaultsToLatestHistoricalMonthVersion(t *testing.T) {
 	loc, _ := time.LoadLocation(DefaultShiftTimezone)
 	store := testScheduleExportStore(t, loc)
@@ -74,7 +82,8 @@ func TestScheduleCSVExportIncludesNamePhoneAndMonthMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	users, _ := store.LoadUsers()
-	data := buildScheduleExportData(2026, 5, version, items, users, loc)
+	shifts, _ := store.LoadShifts()
+	data := buildScheduleExportData(2026, 5, version, items, users, enabledShifts(shifts), loc)
 	var buf bytes.Buffer
 	if err := writeScheduleCSV(&buf, data); err != nil {
 		t.Fatal(err)
@@ -91,9 +100,13 @@ func TestScheduleCSVExportIncludesNamePhoneAndMonthMatrix(t *testing.T) {
 	if rows[1][0] != "姓名" || rows[1][1] != "手机号" || rows[1][2] != "用户组" {
 		t.Fatalf("unexpected matrix headers: %#v", rows[1][:3])
 	}
+	csvText := strings.Join(flattenRows(rows), "|")
+	if !strings.Contains(csvText, "班次时间说明") || !strings.Contains(csvText, "00:00-09:00") {
+		t.Fatalf("expected CSV export to include shift time legend, got %#v", rows)
+	}
 }
 
-func TestScheduleXLSXExportIsValidZipWithTwoSheets(t *testing.T) {
+func TestScheduleXLSXExportIsValidZipWithShiftLegendSheet(t *testing.T) {
 	loc, _ := time.LoadLocation(DefaultShiftTimezone)
 	store := testScheduleExportStore(t, loc)
 	version, items, err := store.ResolveScheduleMonthVersion(2026, 5, "revision:2", loc)
@@ -101,7 +114,8 @@ func TestScheduleXLSXExportIsValidZipWithTwoSheets(t *testing.T) {
 		t.Fatal(err)
 	}
 	users, _ := store.LoadUsers()
-	data := buildScheduleExportData(2026, 5, version, items, users, loc)
+	shifts, _ := store.LoadShifts()
+	data := buildScheduleExportData(2026, 5, version, items, users, enabledShifts(shifts), loc)
 	var buf bytes.Buffer
 	if err := writeScheduleXLSX(&buf, data); err != nil {
 		t.Fatal(err)
@@ -114,7 +128,7 @@ func TestScheduleXLSXExportIsValidZipWithTwoSheets(t *testing.T) {
 	for _, f := range zr.File {
 		seen[f.Name] = true
 	}
-	for _, name := range []string{"xl/workbook.xml", "xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml"} {
+	for _, name := range []string{"xl/workbook.xml", "xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml", "xl/worksheets/sheet3.xml"} {
 		if !seen[name] {
 			t.Fatalf("xlsx missing %s; files=%#v", name, seen)
 		}

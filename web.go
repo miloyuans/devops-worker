@@ -1129,7 +1129,8 @@ func (a *App) handleScheduleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	users, _ := a.Store.LoadUsers()
-	exportData := buildScheduleExportData(year, month, version, items, users, loc)
+	shifts, _ := a.Store.LoadShifts()
+	exportData := buildScheduleExportData(year, month, version, items, users, enabledShifts(shifts), loc)
 	filename := fmt.Sprintf("devops-worker-schedule-%04d-%02d-rev%d.%s", year, month, version.Revision, format)
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	if format == "csv" {
